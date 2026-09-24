@@ -1,0 +1,134 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+    margin: 0;
+    font-family: 'JetBrains Mono', monospace;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background-color: #050505;
+    color: #FAFAFA;
+}
+
+h1, h2, h3, h4, h5, h6, .font-heading {
+    font-family: 'Outfit', sans-serif;
+}
+
+@layer base {
+    :root {
+        /* Dark-first theme mapping */
+        --background: 0 0% 2%;              /* #050505 */
+        --foreground: 0 0% 98%;             /* #FAFAFA */
+        --card: 0 0% 7%;                    /* #121212 */
+        --card-foreground: 0 0% 98%;
+        --popover: 0 0% 7%;
+        --popover-foreground: 0 0% 98%;
+        --primary: 189 94% 43%;             /* #06B6D4 cyan */
+        --primary-foreground: 0 0% 0%;
+        --secondary: 240 4% 15%;            /* #27272A */
+        --secondary-foreground: 0 0% 98%;
+        --muted: 240 4% 15%;
+        --muted-foreground: 240 5% 65%;     /* #A1A1AA */
+        --accent: 240 4% 15%;
+        --accent-foreground: 0 0% 98%;
+        --destructive: 0 84% 60%;           /* #EF4444 */
+        --destructive-foreground: 0 0% 100%;
+        --border: 240 4% 15%;               /* #27272A */
+        --input: 240 4% 15%;
+        --ring: 189 94% 43%;
+        --chart-1: 189 94% 43%;
+        --chart-2: 292 84% 61%;
+        --chart-3: 43 96% 56%;
+        --chart-4: 142 71% 45%;
+        --chart-5: 0 84% 60%;
+        --radius: 0.25rem;
+    }
+}
+
+@layer base {
+    * {
+        @apply border-border;
+    }
+    body {
+        @apply bg-background text-foreground;
+    }
+}
+
+/* Custom selection color */
+::selection {
+    background: #06B6D4;
+    color: #000;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #050505; }
+::-webkit-scrollbar-thumb { background: #27272A; border-radius: 0; }
+::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+
+/* Grid background for hero */
+.grid-bg {
+    background-image:
+        linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+    background-size: 32px 32px;
+}
+
+.grid-bg-fade {
+    mask-image: radial-gradient(ellipse 80% 60% at 50% 40%, black 30%, transparent 100%);
+    -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 40%, black 30%, transparent 100%);
+}
+
+/* Sharp panel */
+.panel {
+    background: #121212;
+    border: 1px solid #27272A;
+}
+
+.panel-hover:hover {
+    background: #1C1C1C;
+    transition: background-color 150ms ease;
+}
+
+/* Terminal blinking cursor */
+@keyframes blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+}
+.cursor-blink { animation: blink 1s step-end infinite; }
+
+/* Annotation canvas */
+.annotation-crosshair { cursor: crosshair; }
+
+.no-select {
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* Fade-in */
+@keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.fade-in-up { animation: fadeInUp 400ms ease-out both; }
+
+/* Debug wrappers from template */
+@layer base {
+    [data-debug-wrapper="true"] { display: contents !important; }
+    [data-debug-wrapper="true"] > * {
+        margin-left: inherit; margin-right: inherit;
+        margin-top: inherit; margin-bottom: inherit;
+        padding-left: inherit; padding-right: inherit;
+        padding-top: inherit; padding-bottom: inherit;
+        column-gap: inherit; row-gap: inherit; gap: inherit;
+        border-left-width: inherit; border-right-width: inherit;
+        border-top-width: inherit; border-bottom-width: inherit;
+        border-left-style: inherit; border-right-style: inherit;
+        border-top-style: inherit; border-bottom-style: inherit;
+        border-left-color: inherit; border-right-color: inherit;
+        border-top-color: inherit; border-bottom-color: inherit;
+    }
+}

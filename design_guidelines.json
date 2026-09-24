@@ -1,0 +1,107 @@
+{
+  "theme": "dark-first",
+  "typography": {
+    "fonts": {
+      "headings": "Outfit, sans-serif",
+      "body": "JetBrains Mono, monospace"
+    },
+    "scale": {
+      "h1": "text-4xl sm:text-5xl tracking-tight font-bold",
+      "h2": "text-2xl sm:text-3xl tracking-tight font-semibold",
+      "h3": "text-xl tracking-tight font-medium",
+      "h4": "text-lg tracking-tight font-medium",
+      "body": "text-sm leading-relaxed",
+      "small": "text-xs leading-normal",
+      "labels": "text-[10px] sm:text-xs uppercase tracking-[0.2em] font-bold"
+    },
+    "instructions_to_main_agent": "Import 'Outfit' and 'JetBrains Mono' from Google Fonts. Use Outfit exclusively for structural headings (H1-H4). Use JetBrains Mono for all body text, metrics, tables, navigation, and code snippets. This creates a highly technical, precise developer-tool aesthetic."
+  },
+  "colors": {
+    "archetype": "Electric & Neon (Future, Speed, Disruption) layered over deep structural blacks. Adjusted for CV technical precision.",
+    "palette": {
+      "background": "#050505",
+      "foreground": "#FAFAFA",
+      "surface": "#121212",
+      "surface_hover": "#1C1C1C",
+      "border": "#27272A",
+      "primary": "#06B6D4",
+      "primary_foreground": "#000000",
+      "secondary": "#27272A",
+      "secondary_foreground": "#FAFAFA",
+      "destructive": "#EF4444",
+      "destructive_foreground": "#FFFFFF",
+      "muted": "#27272A",
+      "muted_foreground": "#A1A1AA",
+      "annotation_cyan": "#06B6D4",
+      "annotation_magenta": "#D946EF",
+      "annotation_yellow": "#EAB308"
+    },
+    "instructions_to_main_agent": "Use dark mode as default. Map these custom hex codes into tailwind.config.js under the 'dark' block of the colors theme. Never use pure #000000, always use #050505. Avoid gradients. Solid blocks of color create a technical 'terminal' feel. Use annotation colors strictly for canvas bounding boxes, polygon traces, and AI auto-labeling indicators."
+  },
+  "visual_enhancers": {
+    "surfaces": "Grid Borders (The 'Technical' Look). Use `border-collapse` layout where applicable for tables and stat blocks. Items separated by 1px solid borders (`border-border`).",
+    "shadows": "Minimal to none. Rely on crisp 1px strokes instead of soft box-shadows. This is a developer tool, not a consumer social app.",
+    "radii": "Sharp precision. Use `rounded-sm` (4px) or `rounded-none` for all containers, buttons, and inputs.",
+    "glassmorphism": "Restricted! Only use high-saturation glassmorphism (`backdrop-blur-xl bg-[#121212]/80 border-b border-white/10`) for the sticky top navigation or floating action bars. Never use over the image annotation area."
+  },
+  "grids_and_layouts": {
+    "spacing_scale": "High Density Protocol. Use `gap-4` or `gap-6` for dashboard widget grids. Use `p-4` or `p-6` inside cards.",
+    "dashboard_grid": "Start mobile-first (`grid-cols-1`). On desktop, use `md:grid-cols-3 lg:grid-cols-4`. Use F-Pattern layout: Key project metrics top-left, list of datasets/models spanning downward.",
+    "annotation_workspace": "Three-pane layout: Left sidebar (tools), Center (canvas/image), Right sidebar (classes/labels list).",
+    "instructions_to_main_agent": "Grid items MUST be direct children. Override default stretch with `items-start` if needed. Use flexbox with `justify-between` for dense list items."
+  },
+  "components": {
+    "buttons": "Sharp buttons (`rounded-sm`). Primary buttons use solid Cyan (`bg-primary text-black hover:bg-cyan-400`). Secondary buttons use transparent background with border (`border border-border hover:bg-surface_hover`).",
+    "inputs": "Shadcn standard but customized to `rounded-sm`, `bg-transparent`, and a `focus:ring-2 focus:ring-primary` state. Never remove focus outlines.",
+    "cards": "Cardless aesthetic preferred, or flat rectangular panels. `border border-border bg-surface` with zero shadow.",
+    "tables": "Dense. JetBrains Mono font. 1px bottom border on rows. No alternating background colors (keep it clean).",
+    "dropdowns": "CRITICAL: NO transparent backgrounds. Must have solid `bg-surface` with `border border-border`."
+  },
+  "motion": {
+    "micro_interactions": "Hover states on lists and buttons must have a discrete color shift. Example: `hover:bg-[#1C1C1C] transition-colors duration-150`.",
+    "canvas": "Zero transition on canvas elements (bounding boxes) for instant response time.",
+    "instructions_to_main_agent": "Do NOT use `transition-all`. Specify `transition-colors`, `transition-opacity`, or `transition-transform` explicitly. Respect `prefers-reduced-motion`."
+  },
+  "accessibility": {
+    "contrast": "Text must meet APCA standards. If text is over an image, add a text-shadow or a dark scrim.",
+    "focus": "All interactive elements must display a high-contrast focus ring (`focus:ring-2 focus:ring-primary focus:outline-none`).",
+    "testing": "All interactive and key informational elements MUST include `data-testid` attribute (kebab-case, role-based). Example: `data-testid='add-polygon-button'`."
+  },
+  "media": {
+    "icons": {
+      "library": "@phosphor-icons/react",
+      "instructions_to_main_agent": "Run `yarn add @phosphor-icons/react`. Use standard Phosphor icons with `weight='regular'`."
+    },
+    "image_urls": [
+      {
+        "url": "https://images.unsplash.com/photo-1597762333765-cbcd63dd8acc?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NDh8MHwxfHNlYXJjaHwxfHxidXN5JTIwY2l0eSUyMHN0cmVldCUyMHRyYWZmaWN8ZW58MHx8fHwxNzgzODA4MTg1fDA&ixlib=rb-4.1.0&q=85",
+        "category": "dataset_example_1",
+        "description": "Use this as an example dataset image for traffic/vehicle object detection."
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1647427060118-4911c9821b82?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2NDN8MHwxfHNlYXJjaHwzfHxtYW51ZmFjdHVyaW5nJTIwZmFjdG9yeSUyMGxpbmV8ZW58MHx8fHwxNzgzODA4MTg1fDA&ixlib=rb-4.1.0&q=85",
+        "category": "dataset_example_2",
+        "description": "Use this as an example dataset image for industrial/manufacturing defect detection."
+      }
+    ]
+  },
+  "3d_libraries": {
+    "instructions_to_main_agent": "Not recommended for this specific 2D computer vision annotation tool. Stick to Recharts for the model training simulation & deployment dashboard (loss curves, mAP metrics)."
+  },
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "You tend to converge toward generic, 'on distribution' outputs. In frontend design, this creates what users call the 'AI slop' aesthetic. Avoid this: make creative, distinctive frontends that surprise and delight.",
+    "Dark colors look good when used independently without gradients. DO NOT use dark colors as gradients.",
+    "Don't make generic centered layouts. Left-align text and data unless symmetry explicitly helps.",
+    "Create depth through layered design elements with z-index hierarchy, but keep surface textures flat (no heavy drop shadows).",
+    "Use glass-morphism effects with backdrop filters ONLY on floating headers, NOT on content-heavy sections.",
+    "You MUST NOT apply universal transition. Eg: `transition: all`. This results in breaking transforms. Always add transitions for specific interactive elements.",
+    "You MUST NOT center align the app container, ie do not add `.App { text-align: center; }` in the css file.",
+    "Always use modern button styles, specifically sharp or pill-shaped with distinct hover states.",
+    "NEVER: use AI assistant Emoji characters like 🤖🧠💭💡🔮🎯 etc for icons. Use Phosphor Icons.",
+    "Every interaction needs micro-animations - hover states, transitions, parallax effects, and entrance animations.",
+    "Use 2-3x more spacing than feels comfortable. Cramped designs look cheap.",
+    "CRITICAL: DO NOT use complete `transparent` background in header, overlays, any surface that has content under it.",
+    "CRITICAL: Include `data-testid` on all buttons, forms, and interactive inputs.",
+    "Use `sonner` for toasts. Install components as `.js` or `.jsx` instead of `.tsx` since this is a JS project."
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "summary": "Iteration 8 bug-fix backend smoke: 10/10 tests passed. Verified MongoDB indexes startup log, invite auto-activation (both via register and via get_current_user for already-logged-in users), and cancel-training endpoint (queued -> cancelled, training -> flag set, terminal -> 400, missing -> 404, non-owner -> 403). Regression on /auth/me and /projects passes.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/tests/bugfix_smoke.py", "/app/test_reports/pytest/iteration_8.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is 2105 lines — recommend splitting into routers (auth, teams, projects, models, comments, notifications) for maintainability.",
+    "_activate_pending_invites is called on every authenticated request via get_current_user; wrapped in try/except which swallows all errors silently. Consider logging exceptions instead of pass so real DB failures don't go unnoticed.",
+    "cancel_model_training uses two separate awaited updates when status was 'queued'; could be combined into a single $set update for atomicity.",
+    "invite_member returns 400 'User already a member' even if the existing row is 'pending' — inconsistent with the auto-activation flow (owner can't re-invite to fix a stale pending row). Consider idempotent upsert."
+  ],
+  "updated_files": ["/app/tests/bugfix_smoke.py"],
+  "success_rate": {"backend": "100%", "frontend": "not tested (skipped per request)"},
+  "test_credentials": "demo@vf.io / demo1234; fresh users registered per test with uuid emails",
+  "seed_data_creation": "Inserted fake model docs (status=queued/training/trained/cancelled/failed) directly via pymongo to avoid running real YOLO training. Inserted one pending team_members row to simulate the exact fix scenario for get_current_user auto-activation.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "bugfix_smoke.py covers invite auto-activation (2 paths) + cancel endpoint (5 cases). To test full cancel-during-training flow with real YOLO, would need 30+ approved images seeded — deferred as too slow per request.",
+  "rca of the issue": "N/A — this iteration verified fixes; no new bugs found."
+}

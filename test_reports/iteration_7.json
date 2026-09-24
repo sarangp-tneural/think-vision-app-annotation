@@ -1,0 +1,35 @@
+{
+  "summary": "Iteration 7 backend smoke for Phase 2 (per-project settings + smart auto-label router). 9 passed, 1 skipped (optional trained-model branch not reachable by fresh test user). All settings CRUD, clamping, partial-patch, activity logging, RBAC (member 403), and router source='gemini' (no active model + fallback on/off) verified. Batch auto-label job creates and progresses. Trained-model 'model+gemini'/'model_no_fallback' branches not re-exercised (already verified in iteration 6 and the pre-existing active trained model belongs to a different team). No functional bugs found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/images/{img_id}/auto-label", "issue": "When _auto_label_router returns pure 'model' path (len(model_boxes) >= min_boxes), the model boxes coming from _yolo_predict_sync do NOT carry a 'source' key on each box — only 'confidence'. The 'source' key is added to model boxes only in the combined 'model+gemini' branch (server.py L2012-2013). Spec: 'Model-generated boxes include a confidence float AND source key on each box.' Fix: set b['source']='model' inside _yolo_predict_sync (or set it uniformly before returning from router)."},
+      {"endpoint": "PATCH /api/projects/{pid}/settings", "issue": "No explicit validation error for out-of-range confidence — request silently clamps to [0.05, 0.95]. Acceptable per spec ('clamped'), but consider returning a 200 body flag or 422 on gross violations (>1 or <0) for API clarity."},
+      {"endpoint": "_auto_label_router", "issue": "Comment at spec case (b): 'source=gemini if model had zero boxes'. Current code returns 'model+gemini' when model_boxes non-empty AND fallback triggered; when model_boxes empty (and model_ran) it falls through and returns 'gemini' — matches spec. However confidence filtering is delegated to YOLO conf param, so setting confidence_threshold=0.95 pre-filters at inference time; verified logic-wise, not run E2E in this iteration."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/tests/settings_smoke.py",
+    "/app/test_reports/pytest/settings_results.xml"
+  ],
+  "action_items": [
+    "Add 'source': 'model' to boxes returned by _yolo_predict_sync (or add uniformly in router before returning 'model' path) so all model boxes carry source key per Phase-2 contract."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 2048 lines — modularization overdue (auth/projects/images/annotations/router/models/batch/teams routers).",
+    "ProjectSettingsIn accepts any float/int without pydantic Field constraints; clamping is done manually. Consider Field(ge=0.05, le=0.95) for confidence and Field(ge=0) for min_boxes — self-documenting and returns 422 automatically.",
+    "PATCH /projects/{pid}/settings returns only {'settings': {...}} but the rest of project payload is not returned — inconsistent with POST /projects which returns full project via _project_out. Consider returning _project_out(pid) for parity.",
+    "_auto_label_router: model boxes 'confidence' from ultralytics is not clamped to [0,1] (they can be very slightly >1 in edge cases — unlikely but worth min-clamping).",
+    "No test/API path exposes a way to preview boxes filtered by show_confidence for the client — show_confidence is only a UI hint. Should be documented.",
+    "Batch auto-label source_counts only initialized for {'model','gemini'} — 'model+gemini' and 'model_no_fallback' branches now write into source_counts but were not added to the initial dict; setdefault via .get(source,0)+1 is fine, but downstream consumers should be updated to expect 4 possible keys."
+  ],
+  "updated_files": ["/app/tests/settings_smoke.py"],
+  "success_rate": {"backend": "100% (9/9 executed; 1 optional skipped)", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "demo@vf.io/demo1234 exists. Tests self-register TEST_settings_<uuid>@vf.io/pw12345 users per module.",
+  "seed_data_creation": "Per run: 1 owner user + 1 project (personal team). ~3 PNG test images. 1 additional member user + team invite for RBAC test. No cleanup.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Phase-2 settings + router verified. Only outstanding contract deviation: model boxes lack 'source' key on the pure 'model' path (minor). Trained-model combined & model_no_fallback branches were verified indirectly (code review) and in iteration 6 for the model source; re-testing them requires a fresh full YOLO training (~4min) OR reusing project 75ec020a-1b55-4e78-95ed-4a15a8830f4b which has an active model but is owned by an iteration-6 test user. To exercise them in future, either grant the test user access to that project or seed a lightweight fake trained model doc.",
+  "rca of the issue": "N/A — no failures after test fix. Initial failure was case-sensitivity in email comparison (backend lowercases emails). Fixed in test."
+}

@@ -1,0 +1,38 @@
+{
+  "summary": "Iteration 6 backend smoke: full E2E verification of real YOLOv8n self-training pipeline. All 8 tests PASS (3m45s). Verified 30-image gate (400 with '30 labeled images' in detail), queued/real/yolov8n job creation, status progression queued->preparing->training->trained, GET /models/{mid} polling, weights_path + final_mAP/precision/recall populated on completion, activate 400 when not yet trained, activation sets is_active on THIS model and clears others (single-active), auto-label returns source='model' after activation with boxes, source='gemini' fallback for projects with no active model, GET /projects/{pid}/models still lists real+other, batch auto-label writes source_counts={model,gemini} on batch_jobs.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/projects/{pid}/batch-auto-label", "issue": "Payload schema BatchAutoLabelIn accepts only {only_unlabeled: bool} - no way to explicitly pass image_ids (contract description in review request implied image_ids). Works fine via only_unlabeled=True but callers cannot restrict to a subset."},
+      {"endpoint": "POST /api/projects/{pid}/train-real", "issue": "Uses FastAPI BackgroundTasks bound to the request - long-running YOLO training (minutes) blocks the request's background task lifecycle; on uvicorn worker restart mid-training the job stays 'training' forever with no watchdog. Consider a dedicated worker/queue."},
+      {"endpoint": "_train_yolo_sync", "issue": "Downloads yolov8n.pt to backend cwd on first call (ultralytics does this). First training run in a fresh pod pays a network + write penalty; consider pre-bundling yolov8n.pt at /app/backend/."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/tests/real_training_smoke.py",
+    "/app/test_reports/pytest/real_training_results.xml",
+    "/app/test_reports/pytest/rt_out.log"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is now 1987 lines — long overdue to split into feature routers (auth/projects/images/annotations/review/comments/notifications/models/batch/teams).",
+    "_train_yolo_sync uses synchronous PyMongo inside asyncio.to_thread — OK but note ObjectId leaks if any downstream code reads without projection; current code updates by 'id' only so safe.",
+    "activate_model deactivates ALL prior models including simulated ones in the same project — matches spec (single-active), but consider also emitting an activity/notification event beyond _log_activity for observability.",
+    "_auto_label_router falls back to Gemini on ANY inference exception (including transient GPU/thread errors) — could silently degrade quality. Consider a retry-once policy for local inference before falling back.",
+    "MIN_TRAINING_IMAGES=30 is hardcoded; expose via env or per-project config for flexibility.",
+    "No pagination or lifecycle cleanup on db.models — over time inactive/failed models accumulate per project.",
+    "Weights are pulled from object storage every time _load_yolo is called for a fresh weights_path (cached in-process dict only). On multi-worker uvicorn deployments the cache is per-worker so cold-inference latency will spike. Consider a shared local file cache under /tmp keyed by weights_path hash.",
+    "train_real endpoint accepts arbitrary epochs (default 30) with no upper bound — could DoS the pod. Cap at e.g. 200."
+  ],
+  "updated_files": [
+    "/app/tests/real_training_smoke.py (new)"
+  ],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "Test self-registers TEST_rt_<uuid>@vf.io/pw12345 users per module. demo@vf.io/demo1234 also present.",
+  "seed_data_creation": "Per-test-run: 1 fresh user, 2 projects (one 'small' with 3 approved+annotated images for the 400-gate test, one 'big' with 32 approved+annotated synthetic images (red rects + blue circles) used for actual YOLOv8 training + activation + inference). Training runs at epochs=3, imgsz=640, batch=8, CPU — ~3min end-to-end on this pod. Not cleaned up (matches prior iterations).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "real_training_smoke.py exercises the full pipeline including a real 3-epoch YOLOv8n training that takes ~3-4 minutes on CPU. Tests use module-scoped fixtures and stash rt_model_id/rt_trained_doc on pytest module for cross-test state. Prior smoke suites (backend_smoke.py, teams_smoke.py, annotator_v2_smoke.py, review_batch_smoke.py, collab_smoke.py) were NOT re-run this iteration but per iteration_5 report were fully green. Public URL https://ai-vision-hub-20.preview.emergentagent.com occasionally throttles bursty uploads; the test uses urllib3 Retry(total=5, backoff=1.5) — recommend keeping that pattern in future tests.",
+  "rca of the issue": "No functional issues detected. Initial test run had connect timeouts to the public URL during a 32-image upload burst; adding session-level HTTPAdapter retries fixed it and the second run completed all 8 tests including full training in 3m45s. Root cause of the transient timeouts was ingress-level connection pressure, not the backend."
+}

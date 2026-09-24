@@ -1,0 +1,23 @@
+{
+  "summary": "Frontend-only regression + new-feature testing for VisionForge iteration 10: AL Queue tab, Deploy real-training auto-scale hint, and bbox move/resize handles in Annotator. All 5 requested features verified passing.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Annotator.jsx onMouseDown always calls setSelectedIdx(null) even before startDrawing — works because bbox startEdit uses stopPropagation. Consider avoiding starting a new drawing on empty-canvas click if the intent is pure deselect (currently a tiny non-committed drawing is spawned but discarded due to <MIN threshold; harmless).",
+    "ModelDeploy.jsx trainingPlan hint always shows 'Currently X/30 eligible' when not ready, and doesn't yet distinguish user-entered epochs from recommended in the 'not ready' branch — matches spec but could be clearer."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "skipped", "frontend": "100%"},
+  "test_credentials": "demo@vf.io / demo1234",
+  "seed_data_creation": "Used existing project bfe96c8a-8ca3-4ddb-9a35-e401e688f49e (annotator-test) with 1 image; class 'car' already present.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Verified: (1) AL Queue tab loads, refresh returns 1 item with uncertainty=100 (unlabeled default, no active model). (2) Deploy real-training default epochs=0, hint shows 'Currently 0/30 eligible' both for epochs=0 and epochs=5 (project has <30 labeled images, so eligibility hint remains — this is spec-correct). (3) Annotator draw bbox creates data-testid='bbox-0'. Click bbox → all 8 resize handles (nw,n,ne,e,se,s,sw,w) appear with correct data-testids. Move body 50px right works (bbox translated, clamped to edge). SE resize on small bbox: 80x60 → 110x90 (dw=30, dh=30). NW resize also works. (4) Click empty canvas → handles disappear (0). (5) Save works, Auto-Label button visible, ESC during drawing cancels. Note: When testing resize, use a SMALL bbox positioned away from edges — clamping to [0,1] normalized bounds will silently no-op if bbox is pinned against canvas edge.",
+  "rca of the issue": "N/A — no bugs found."
+}

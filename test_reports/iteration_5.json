@@ -1,0 +1,33 @@
+{
+  "summary": "Iteration 5 backend collaboration tests: 27/27 passing. Covered role invites (annotator/reviewer), project assign/unassign/list, idempotency, silent skip of non-members, annotator project-filter access rule, owner bypass, bulk-assign with priority/due/notes + notification + 400 non-member + 403 non-admin, PATCH /images/{id}/task, comments (top-level, reply, resolve, list sorted), activity log entries, notifications (list/single-read/mark-all-read), project + team dashboards (403 for annotator, OK for reviewer), and full multi-user E2E lifecycle (assign -> upload -> bulk -> annotate -> submit -> review -> notifications -> activity log).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/tests/collab_smoke.py",
+    "/app/test_reports/pytest/collab_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is now 1738 lines — split into routers (teams, projects, images, comments, notifications, dashboards) is overdue.",
+    "GET /api/projects and _project_access_check both query project_assignments per-project inside a loop — could become N+1 on teams with many projects. Consider pre-aggregating a set of assigned project_ids for the caller and 'projects with any assignments' set in one shot.",
+    "list_project_assignments does a db.projects.find_one({id: pid}) inside the per-assignment loop; hoist that out of the loop.",
+    "_notify / _log_activity swallow all exceptions with only a log — good for non-fatal behaviour but consider counting failures for observability.",
+    "Bulk-assign response returns only {updated: count}; would be helpful to also return which image_ids were actually updated (vs missing ones).",
+    "resolve_comment does not enforce reviewer/owner — any project member can resolve any comment. Intentional? Consider restricting to owner/admin/reviewer or the original commenter.",
+    "review_image restricts to owner/admin, but the review_needed notification is sent to owner/admin/reviewer — reviewers get notified but cannot act. Either allow reviewers to review or exclude them from review_needed notifications.",
+    "No pagination on GET /api/notifications (capped at 200) or activity log (capped at 200/limit)."
+  ],
+  "updated_files": [
+    "/app/tests/collab_smoke.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "demo@vf.io / demo1234 (unused). Tests self-register fresh TEST_-prefixed users per module.",
+  "seed_data_creation": "Fresh users/teams/projects created per test module with TEST_ prefix; not cleaned up (matches prior iterations).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "collab_smoke.py covers all iteration-5 endpoints incl. the E2E multi-user flow. Prior smoke suites (backend_smoke.py, teams_smoke.py, annotator_v2_smoke.py, review_batch_smoke.py) not re-run this iteration — main agent claims iterations 1-4 all pass. Consider re-running full suite if regression suspected. All tests run against REACT_APP_BACKEND_URL public URL.",
+  "rca of the issue": "No issues found. All 27 collaboration tests pass on first run — reviewer/annotator role enforcement, assignment-based project filtering, bulk-assign, comments/replies/resolve, activity log, notifications, and dashboards all behave as specified."
+}

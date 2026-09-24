@@ -1,0 +1,34 @@
+{
+  "summary": "Iteration 9 backend validation: Resend invite flow (pending + active), training-plan preview, train-real epoch range validation, insufficient-images path, active-learning-queue shape/sort/limit, and cancel-on-queued. All 11 tests PASS.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration9_new_endpoints.py",
+    "/app/test_reports/pytest/iteration9_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is 2323 lines — approaching size where splitting into routers (teams.py, projects.py, training.py, active_learning.py) would help maintainability.",
+    "active-learning-queue: For unlabeled images the endpoint short-circuits with a constant 0.85 uncertainty (comment says 'keep endpoint fast'). Consider making this pass-through when an active model exists — currently the endpoint doesn't provide model-derived uncertainty for the 'no annotations' case, which partly defeats the active-learning goal.",
+    "invite_member returns 400 'Invite already pending' for duplicate emails — consider idempotent behavior (return existing invite) since UI may retry.",
+    "send_invite_email catches all exceptions and truncates to 200 chars — good; but error string exposure to API response could leak Resend internals. Consider mapping to a stable error code.",
+    "auto_scale_epochs() thresholds (<50→10, <150→20, <500→30, else 50) are hard-coded — expose via project settings for power users."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration9_new_endpoints.py (new)"
+  ],
+  "success_rate": {"backend": "100% (11/11)", "frontend": "not tested (as requested)"},
+  "test_credentials": "demo@vf.io / demo1234",
+  "seed_data_creation": "Created TEST_*@example.com users/invites (pending + active) on demo user's default team. Created and cleaned up 1 fake queued model doc in models collection.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "New endpoints validated: POST /api/teams/{tid}/invite (Resend integration returns sent:false with clear domain-verification error for unverified tneuralai.com but membership is still created — CONFIRMED EXPECTED BEHAVIOR), GET /api/projects/{pid}/training-plan, GET /api/projects/{pid}/active-learning-queue, POST /api/projects/{pid}/train-real (epoch validation only), POST /api/models/{mid}/cancel on queued status. auto_scale_epochs field 'epochs_auto_scaled' was verified via code review (server.py L1981-1983) — could not verify end-to-end without ≥30 labeled images since running YOLO takes 5-15min. Demo project has 0 eligible images so training-plan returns ready=false, recommended_epochs=10 as expected.",
+  "rca of the issue": "N/A — no issues found."
+}

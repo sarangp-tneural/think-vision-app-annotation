@@ -1,0 +1,34 @@
+{
+  "summary": "Backend iteration 3 tests: annotation shape types (bbox/polygon/polyline/point/ellipse + backward compat), improved exports (YOLO/COCO/VOC) with actual image bytes and correct folder structure, video frame extraction via cv2 in background task, team owner auto-approval. All 11 new tests pass after fixing one critical bug in video upload background scheduling. Prior smoke tests (25 tests) still pass.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/projects/{pid}/videos", "issue": "Fixed by testing agent: background.add_task was passed `lambda: asyncio.create_task(_job())` — starlette runs sync callables in threadpool worker where no event loop exists, raising RuntimeError: no running event loop, so frame extraction never ran and video status stayed 'queued' forever.", "priority": "CRITICAL"}
+    ],
+    "minor": []
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/tests/annotator_v2_smoke.py",
+    "/app/test_reports/pytest/annotator_v2_results.xml"
+  ],
+  "action_items": [
+    "Confirm background task fix (server.py:769 now `background.add_task(_job)`) is intended — the async coroutine function is passed directly so FastAPI/Starlette awaits it in the event loop."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1130+ lines — consider splitting into modules (auth, teams, projects, images, videos, exports).",
+    "_extract_frames_sync uses a sync pymongo client inside a thread, which is fine, but any storage upload failure is only logged and never surfaces to the video document beyond a partial progress; consider recording per-frame failures count.",
+    "Export function fetches image bytes sequentially via HTTP; for larger datasets this will be slow. Consider concurrent fetch or streaming into the zip.",
+    "AnnotationBox has `extra='allow'` which is good for forward-compat but no server-side validation ensures polygon points are within [0,1] or that ellipse has non-zero rx/ry."
+  ],
+  "updated_files": [
+    "/app/backend/server.py (line 769: background task scheduling fix)",
+    "/app/tests/annotator_v2_smoke.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "demo@vf.io / demo1234",
+  "seed_data_creation": "Tests create TEST_-prefixed projects/teams and delete them in fixture teardown.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "annotator_v2_smoke.py covers all iteration-3 features. Video test uploads a 30-frame 320x240 synthetic mp4 with interval_frames=5, polls /api/videos/{vid} up to 90s. Frontend was not tested per request. Run env: REACT_APP_BACKEND_URL must be exported before pytest.",
+  "rca of the issue": "Video frame extraction never started because background scheduling used `background.add_task(lambda: asyncio.create_task(_job()))`. Starlette BackgroundTask treats non-coroutine callables as sync and runs them via anyio.to_thread.run_sync in a worker thread. Inside that thread there is no running event loop, so `asyncio.create_task(...)` raised `RuntimeError: no running event loop` and the coroutine was garbage-collected (RuntimeWarning: coroutine was never awaited). Fix: pass the async `_job` coroutine function directly to `background.add_task(_job)` so Starlette awaits it on the main event loop. Verified: with fix, video moves queued → processing → completed in ~2-4s and extracted frames appear as images with `from_video` field."
+}

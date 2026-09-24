@@ -1,0 +1,44 @@
+{
+  "summary": "Full backend E2E smoke test executed against public URL. All 22 checks passed after fixing 3 test-script contract mismatches (add class expects 'label', save_annotations expects 'boxes', train requires version_id + model_arch). All feature areas verified: auth (register/login/me), projects CRUD, classes, image upload, list, file download (header + ?auth= query), annotations, Gemini auto-label, versions, exports (yolo/coco/voc), simulated train, models list, and cleanup deletes.",
+  "tested_scope": ["backend", "auth", "integration"],
+  "passed": [
+    "POST /api/auth/register (400 when exists) + fallback /api/auth/login returns token",
+    "POST /api/auth/login returns token (key='token' as per contract)",
+    "GET /api/auth/me returns user with correct email",
+    "POST /api/projects creates project (object_detection)",
+    "GET /api/projects lists projects",
+    "GET /api/projects/{pid} returns project",
+    "POST /api/projects/{pid}/classes adds class",
+    "POST /api/projects/{pid}/images uploads JPEG via Emergent object storage",
+    "GET /api/projects/{pid}/images lists images",
+    "GET /api/files/{path} works with Authorization header (2528 bytes returned)",
+    "GET /api/files/{path}?auth=<token> works via query param (2528 bytes)",
+    "PUT /api/images/{id}/annotations saves boxes and merges labels into project classes",
+    "POST /api/images/{id}/auto-label completes successfully via Gemini 2.5-flash (returned empty boxes for synthetic solid-color image - endpoint working)",
+    "POST /api/projects/{pid}/versions creates version with snapshot_image_ids",
+    "GET /api/projects/{pid}/versions lists versions",
+    "GET /api/projects/{pid}/export?format=yolo returns valid zip (514B, data.yaml + labels)",
+    "GET /api/projects/{pid}/export?format=coco returns valid zip (334B, annotations.json)",
+    "GET /api/projects/{pid}/export?format=voc returns valid zip (295B, per-image XML)",
+    "POST /api/projects/{pid}/train returns synthetic metrics with epochs/final_mAP/final_loss (MOCKED - intentional MVP simulation)",
+    "GET /api/projects/{pid}/models lists trained models (count=1)",
+    "DELETE /api/images/{id} deletes image",
+    "DELETE /api/projects/{pid} deletes project"
+  ],
+  "failed": [],
+  "action_items": [
+    "None - backend is fully functional end-to-end. Note: auto-label may return empty boxes for synthetic test images; use real photos in UI to see Gemini detections. Also observed: earlier run hit a transient LiteLLM 'Budget exceeded' error on /auto-label (Emergent LLM key budget), which self-resolved on the successful retry. Monitor Emergent LLM budget if auto-label starts 500'ing in production."
+  ],
+  "success_rate": {"backend": "100%", "frontend": "not tested (skipped per request)"},
+  "retest_needed": false,
+  "full_testing_deferred": true,
+  "notes": {
+    "auth_key_contract": "Login/register response returns JWT under key 'token' (intended contract, matches frontend expectation)",
+    "mocked_apis_confirmed": ["/api/projects/{pid}/train - synthetic training curves as documented"],
+    "test_script_fixes_applied": [
+      "add class: {'name':...} -> {'label':...}",
+      "save annotations: {'annotations':...} -> {'boxes':...} with normalized 0-1 coords",
+      "train: added required version_id + model_arch"
+    ]
+  }
+}

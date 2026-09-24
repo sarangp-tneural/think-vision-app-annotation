@@ -1,0 +1,25 @@
+{
+  "summary": "Iteration 11 backend validation: router split (training + active_learning) regression, retrain nudge notifications, YOLO OBB export. All 15/15 tests PASS.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration11_routers_nudge_obb.py",
+    "/app/test_reports/pytest/iteration11_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is still 2226 lines. Router split has begun (training.py, active_learning.py) but the majority of endpoints (images, teams, projects, notifications, exports, comments) remain in server.py. Continue splitting to keep files <700 lines.",
+    "routers/training.py uses `register(server_module)` pattern which works but couples the router to server.py's module namespace (s.db, s.get_current_user, s._project_access_check, s._log_activity, s.MIN_TRAINING_IMAGES, s.auto_scale_epochs, s._train_yolo_sync). Prefer moving shared helpers into a common /app/backend/deps.py or /app/backend/services module for cleaner separation and easier testing.",
+    "_maybe_send_retrain_nudge idempotency relies on `last_retrain_nudge_count` on the project doc. If a training completes between two approvals, the count query resets (uses reviewed_at > last_trained.created_at) but last_retrain_nudge_count is not reset. This could suppress a valid nudge after a completed training cycle. Consider clearing last_retrain_nudge_count on training completion.",
+    "YOLO OBB export writes corner coordinates clamped to [0,1] with max/min. For a 45°-rotated box that extends outside the image, this silently distorts the shape. Consider either raising a warning or preserving out-of-image geometry so downstream tools can decide.",
+    "Export endpoint: no explicit content-length header for streamed zip; fine for small datasets but could be problematic for large exports."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration11_routers_nudge_obb.py (new)"],
+  "success_rate": {"backend": "100% (15/15)", "frontend": "not tested (as requested)"},
+  "test_credentials": "demo@vf.io / demo1234",
+  "seed_data_creation": "Created 2 TEST_iter11_* projects (nudge + obb) via API. Seeded 30 approved images directly in DB for nudge test + 2 approved images for OBB test (one with rotation=0.7854, one plain). Inserted 1 fake queued model doc. All cleaned up via fixture teardown.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Router split verified working: routers/training.py serves /projects/{pid}/training-plan, /projects/{pid}/train-real, /models/{mid}, /models/{mid}/activate, /models/{mid}/cancel. routers/active_learning.py serves /projects/{pid}/active-learning-queue. All existing shapes/status codes preserved. Notifications endpoint returns {items: [...], unread: N} — not a bare list. Retrain nudge notification kind is 'training_ready' when project has never trained, 'retrain_nudge' otherwise; title contains 'X approved images'. YOLO OBB export writes 8-value corner labels only when annotation has non-zero `rotation` field; otherwise falls back to 5-value standard bbox.",
+  "rca of the issue": "N/A — no issues found."
+}

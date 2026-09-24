@@ -1,0 +1,33 @@
+{
+  "summary": "Teams & Collaboration backend tests: 25/25 passed. Covered auto-creation of personal workspace on register/login (idempotent), team CRUD (create/list/get/rename/delete), permission enforcement, invite flows (existing user immediate + pending-email auto-activation on register), member role management (promote, cannot change/remove owner), project team_id scoping, member access to shared projects (upload + annotate), non-member 403, team delete cascade (projects/images/versions/models), and demo user legacy compatibility (team_id migration).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/tests/teams_smoke.py",
+    "/app/test_reports/pytest/teams_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is ~890 lines; consider splitting into modules (auth, teams, projects, images, training) for maintainability.",
+    "list_projects extends with legacy no-team_id projects but _ensure_personal_team migrates them on login/register - legacy branch is effectively dead once migrations run; can be removed.",
+    "DELETE /teams/{tid} uses `to_list(500)` for projects - could miss projects if a team has >500. Prefer async iteration or paginated delete.",
+    "invite_member returns 400 'User already a member' but does not distinguish active vs pending status; UX-wise consider returning 409 for conflict.",
+    "PATCH /teams/{tid}/members/{mid} does not validate that mid belongs to an active membership; role can be changed on a pending invite. Minor.",
+    "No index hints declared on team_members (team_id, user_id, status) - performance concern at scale."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "not tested"},
+  "test_credentials": "demo@vf.io / demo1234 (existing). Test users created dynamically per run with test_a_*/test_b_*/test_pending_*/test_out_* email prefixes and password 'pass1234'.",
+  "seed_data_creation": "Multiple TEST_ prefixed teams and projects were created during the run; some are left in DB (non-cascaded ones) — cleanup not implemented since tests use unique UUIDs each run.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Teams backend fully validated by /app/tests/teams_smoke.py (25 tests, 100% pass). All team flows including invite auto-activation and cascade delete work. Use `_register()` helper which handles existing-user 400 by falling back to login. Auth token key is 'token' (not access_token). Fresh users per run avoid state pollution.",
+  "rca of the issue": "N/A - no failures."
+}
