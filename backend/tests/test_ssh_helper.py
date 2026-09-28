@@ -223,6 +223,43 @@ def test_exec_command_streaming_works_with_no_callback():
     assert out == "ok\n"
 
 
+# --- remote_exists() / remote_remove() / remote_rename() -------------------
+
+def test_remote_exists_true_when_stat_succeeds():
+    mock_client = MagicMock()
+    mock_sftp = MagicMock()
+    mock_client.open_sftp.return_value = mock_sftp
+    assert ssh_helper.remote_exists(mock_client, "/models/prod.pt") is True
+    mock_sftp.stat.assert_called_once_with("/models/prod.pt")
+    mock_sftp.close.assert_called_once()
+
+
+def test_remote_exists_false_when_stat_raises_not_found():
+    mock_client = MagicMock()
+    mock_sftp = MagicMock()
+    mock_sftp.stat.side_effect = FileNotFoundError()
+    mock_client.open_sftp.return_value = mock_sftp
+    assert ssh_helper.remote_exists(mock_client, "/models/prod.pt") is False
+
+
+def test_remote_remove_calls_sftp_remove():
+    mock_client = MagicMock()
+    mock_sftp = MagicMock()
+    mock_client.open_sftp.return_value = mock_sftp
+    ssh_helper.remote_remove(mock_client, "/models/prod.pt.bak2")
+    mock_sftp.remove.assert_called_once_with("/models/prod.pt.bak2")
+    mock_sftp.close.assert_called_once()
+
+
+def test_remote_rename_calls_sftp_rename():
+    mock_client = MagicMock()
+    mock_sftp = MagicMock()
+    mock_client.open_sftp.return_value = mock_sftp
+    ssh_helper.remote_rename(mock_client, "/models/prod.pt.bak1", "/models/prod.pt.bak2")
+    mock_sftp.rename.assert_called_once_with("/models/prod.pt.bak1", "/models/prod.pt.bak2")
+    mock_sftp.close.assert_called_once()
+
+
 # --- upload_file() / download_file() ----------------------------------------
 
 def test_upload_file_creates_remote_dirs_then_puts():

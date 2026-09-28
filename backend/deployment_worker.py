@@ -591,6 +591,11 @@ def _pipeline_testing_sync(run_id: str, project_id: str, history_index: int,
             {"$set": {
                 "busy": False,
                 "updated_at": finished,
+                # awaiting_approval isn't itself a callable stage - nothing
+                # else can produce it, so testing's own success is what
+                # advances the run into the human-review state M8's
+                # approve/reject endpoints are gated on.
+                "status": "awaiting_approval",
                 "testing": {
                     "sample_predictions": sample_predictions,
                     "tester_notified_at": tester_notified_at,
@@ -624,4 +629,160 @@ def _pipeline_testing_sync(run_id: str, project_id: str, history_index: int,
         for p in (candidate_local_pt, baseline_local_pt):
             if p and os.path.exists(p):
                 os.remove(p)
+        sync_client.close()
+
+
+def _pipeline_deploying_sync(run_id: str, project_id: str, history_index: int,
+                              req: dict, get_object_fn) -> None:
+    """The highest-risk worker in the feature (ROADMAP.md SS7): destructive,
+    non-idempotent remote file rotation. Order matters and is deliberate -
+    each step clears the exact destination the next step's rename needs,
+    since plain SFTP rename (unlike a POSIX mv) cannot overwrite an existing
+    destination. Then activates the candidate locally, replicating
+    POST /models/{mid}/activate's exact Mongo writes (routers/training.py) -
+    not an HTTP self-call, since nothing in this codebase's background
+    workers calls its own app's API; _log_activity is intentionally omitted,
+    matching every prior sync worker's same already-accepted gap."""
+    sync_client = MongoClient(MONGO_URL)
+    sync_db = sync_client[DB_NAME]
+    local_candidate_pt = None
+    try:
+        run = sync_db.pipeline_runs.find_one({"id": run_id})
+        if not run:
+            raise Exception("pipeline run not found")
+
+        candidate = run.get("candidate_model") or {}
+        candidate_weights_path = candidate.get("weights_path")
+        local_model_id = candidate.get("local_model_id")
+        if not candidate_weights_path or not local_model_id:
+            raise Exception("no candidate_model on run - run downloading_model first")
+
+        data, _ct = get_object_fn(candidate_weights_path)
+        fd, local_candidate_pt = tempfile.mkstemp(suffix=".pt")
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+
+        prod = req["remote_production_model_path"]
+        bak1, bak2 = f"{prod}.bak1", f"{prod}.bak2"
+        deploy_info = {"current_became_bak1": False, "bak1_became_bak2": False, "bak2_dropped": False}
+
+        with ssh_helper.connect(req["host"], req["port"], req["username"],
+                                 req.get("pem_key"), req.get("password")) as client:
+            if ssh_helper.remote_exists(client, bak2):
+                ssh_helper.remote_remove(client, bak2)
+                deploy_info["bak2_dropped"] = True
+            if ssh_helper.remote_exists(client, bak1):
+                ssh_helper.remote_rename(client, bak1, bak2)
+                deploy_info["bak1_became_bak2"] = True
+            if ssh_helper.remote_exists(client, prod):
+                ssh_helper.remote_rename(client, prod, bak1)
+                deploy_info["current_became_bak1"] = True
+            ssh_helper.upload_file(client, local_candidate_pt, prod)
+
+        # Activate locally - see docstring: replicates
+        # POST /models/{mid}/activate's exact writes, doesn't call it.
+        sync_db.models.update_many({"project_id": project_id}, {"$set": {"is_active": False}})
+        finished = _now_iso()
+        sync_db.models.update_one({"id": local_model_id}, {"$set": {"is_active": True, "activated_at": finished}})
+
+        sync_db.deployment_pipelines.update_one(
+            {"id": run["pipeline_id"]}, {"$set": {"last_deployed_run_id": run_id, "updated_at": finished}},
+        )
+        sync_db.pipeline_runs.update_one(
+            {"id": run_id},
+            {"$set": {
+                "busy": False,
+                "updated_at": finished,
+                "status": "completed",
+                "deploy": {
+                    **deploy_info,
+                    "deployed_at": finished,
+                    "deployed_model_id": local_model_id,
+                },
+                f"stage_history.{history_index}.status": "succeeded",
+                f"stage_history.{history_index}.finished_at": finished,
+            }},
+        )
+    except Exception as e:
+        finished = _now_iso()
+        sync_db.pipeline_runs.update_one(
+            {"id": run_id},
+            {"$set": {
+                "busy": False,
+                "updated_at": finished,
+                "status": "failed",
+                "error": str(e)[:500],
+                f"stage_history.{history_index}.status": "failed",
+                f"stage_history.{history_index}.finished_at": finished,
+            }},
+        )
+    finally:
+        if local_candidate_pt and os.path.exists(local_candidate_pt):
+            os.remove(local_candidate_pt)
+        sync_client.close()
+
+
+def _pipeline_rollback_sync(run_id: str, project_id: str, history_index: int, req: dict) -> None:
+    """Download .bak1's bytes into a local buffer FIRST, before touching
+    anything remotely - getting this ordering wrong (overwriting .bak1
+    before reading it) is the single easiest bug in the whole feature.
+    Single swap, no .bak2 cascade. Per ROADMAP.md SS3's activation rule,
+    rollback does NOT touch models.is_active - only what's live remotely
+    changes."""
+    sync_client = MongoClient(MONGO_URL)
+    sync_db = sync_client[DB_NAME]
+    local_bak1_pt = None
+    try:
+        run = sync_db.pipeline_runs.find_one({"id": run_id})
+        if not run:
+            raise Exception("pipeline run not found")
+
+        prod = req["remote_production_model_path"]
+        bak1 = f"{prod}.bak1"
+
+        with ssh_helper.connect(req["host"], req["port"], req["username"],
+                                 req.get("pem_key"), req.get("password")) as client:
+            if not ssh_helper.remote_exists(client, bak1):
+                raise Exception(f"no {bak1} to roll back to")
+
+            fd, local_bak1_pt = tempfile.mkstemp(suffix=".pt")
+            os.close(fd)
+            ssh_helper.download_file(client, bak1, local_bak1_pt)
+
+            ssh_helper.remote_remove(client, bak1)
+            if ssh_helper.remote_exists(client, prod):
+                ssh_helper.remote_rename(client, prod, bak1)
+            ssh_helper.upload_file(client, local_bak1_pt, prod)
+
+        finished = _now_iso()
+        sync_db.deployment_pipelines.update_one(
+            {"id": run["pipeline_id"]}, {"$set": {"last_deployed_run_id": run_id, "updated_at": finished}},
+        )
+        sync_db.pipeline_runs.update_one(
+            {"id": run_id},
+            {"$set": {
+                "busy": False,
+                "updated_at": finished,
+                "status": "completed",
+                "deploy": {"rolled_back": True, "deployed_at": finished},
+                f"stage_history.{history_index}.status": "succeeded",
+                f"stage_history.{history_index}.finished_at": finished,
+            }},
+        )
+    except Exception as e:
+        finished = _now_iso()
+        sync_db.pipeline_runs.update_one(
+            {"id": run_id},
+            {"$set": {
+                "busy": False,
+                "updated_at": finished,
+                "status": "failed",
+                "error": str(e)[:500],
+                f"stage_history.{history_index}.status": "failed",
+                f"stage_history.{history_index}.finished_at": finished,
+            }},
+        )
+    finally:
+        if local_bak1_pt and os.path.exists(local_bak1_pt):
+            os.remove(local_bak1_pt)
         sync_client.close()

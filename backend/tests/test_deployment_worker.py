@@ -4,9 +4,12 @@ test_ssh_helper.py's style) and, for uploading_data/downloading_model/testing,
 a fake get_object_fn/put_object_fn/yolo_predict_fn (no real object storage or
 Ultralytics - ultralytics isn't even installed in this dev environment, so
 pipeline_logic.evaluate is mocked directly for the testing-stage tests) - but
-against a REAL local MongoDB connection (matching
-test_deployment_pipeline.py's style) to seed a projects/pipeline_runs doc
-beforehand and assert the actual written fields afterward. This is the
+against a REAL local MongoDB connection (matching test_deployment_pipeline.py's
+style) to seed a projects/pipeline_runs doc beforehand and assert the actual
+written fields afterward. The M8 deploying/rollback tests use a shared
+in-memory {path: bytes} dict as a fake remote filesystem, with individual
+ssh_helper functions patched directly (not paramiko's own SFTPClient) -
+matching this file's existing per-function mocking granularity. This is the
 natural continuation of test_deployment_pipeline.py's own stated split: pure/
 no-live-route modules get their own mocked/direct-import test file, exactly
 like ssh_helper.py and pipeline_logic.py already do - deployment_worker.py's
@@ -664,3 +667,228 @@ def test_testing_stage_without_test_image_ids_fails():
         assert "uploading_data" in run["error"]
     finally:
         _cleanup_testing_test(db, pid, rid)
+
+
+# --- _pipeline_deploying_sync() / _pipeline_rollback_sync() (M8) ------------
+# The highest-risk worker in the feature (ROADMAP.md SS7): destructive,
+# non-idempotent remote file rotation. These tests patch ssh_helper's
+# individual module-level functions directly (matching every other test in
+# this file's mocking granularity, not a deeper mock of paramiko's own
+# SFTPClient/open_sftp()), each side_effect closing over one shared
+# in-memory {path: bytes} dict so state persists across the multiple
+# sequential calls within a test - the "mocked in-memory remote filesystem"
+# the roadmap's own DoD asks for.
+
+def _make_fake_remote_fs():
+    fs = {}
+
+    def fake_remote_exists(client, path):
+        return path in fs
+
+    def fake_remote_remove(client, path):
+        if path not in fs:
+            raise FileNotFoundError(path)
+        del fs[path]
+
+    def fake_remote_rename(client, old_path, new_path):
+        if old_path not in fs:
+            raise FileNotFoundError(old_path)
+        if new_path in fs:
+            # Mirrors real SFTP: plain rename cannot overwrite an existing
+            # destination. A wrong operation ordering anywhere in the
+            # implementation raises here instead of silently overwriting.
+            raise OSError(f"{new_path} already exists")
+        fs[new_path] = fs.pop(old_path)
+
+    def fake_upload_file(client, local_path, remote_path, callback=None):
+        with open(local_path, "rb") as f:
+            fs[remote_path] = f.read()
+
+    def fake_download_file(client, remote_path, local_path, callback=None):
+        if remote_path not in fs:
+            raise FileNotFoundError(remote_path)
+        with open(local_path, "wb") as f:
+            f.write(fs[remote_path])
+
+    return fs, fake_remote_exists, fake_remote_remove, fake_remote_rename, fake_upload_file, fake_download_file
+
+
+def _patch_ssh_fs(fs_fns):
+    _fs, fake_exists, fake_remove, fake_rename, fake_upload, fake_download = fs_fns
+    return (
+        patch("deployment_worker.ssh_helper.remote_exists", side_effect=fake_exists),
+        patch("deployment_worker.ssh_helper.remote_remove", side_effect=fake_remove),
+        patch("deployment_worker.ssh_helper.remote_rename", side_effect=fake_rename),
+        patch("deployment_worker.ssh_helper.upload_file", side_effect=fake_upload),
+        patch("deployment_worker.ssh_helper.download_file", side_effect=fake_download),
+    )
+
+
+_DEPLOY_REQ_BASE = {"host": "h", "port": 22, "username": "u", "pem_key": None, "password": "p"}
+
+
+def _seed_deployable_run(db, pid, run_type="fresh_production"):
+    now = datetime.now(timezone.utc).isoformat()
+    rid = str(uuid.uuid4())
+    mid = str(uuid.uuid4())
+    weights_path = f"visionforge/projects/{pid}/pipeline_runs/{rid}/candidate.pt"
+    db.models.insert_one({
+        "id": mid, "project_id": pid, "type": "pipeline_candidate", "is_active": False,
+        "weights_path": weights_path, "created_at": now,
+    })
+    db.pipeline_runs.insert_one({
+        "id": rid, "project_id": pid, "pipeline_id": str(uuid.uuid4()),
+        "run_type": run_type, "status": "awaiting_approval", "busy": True,
+        "approval": {"decision": "approved", "decided_by": "x", "decided_at": now, "note": None},
+        "candidate_model": {"local_model_id": mid, "weights_path": weights_path, "metrics": {}},
+        "stage_history": [{"stage": "deploying", "status": "running", "started_at": now}],
+        "created_at": now, "updated_at": now,
+    })
+    return rid, mid, weights_path
+
+
+def test_two_deploys_plus_rollback_rotate_backups_correctly():
+    db = MongoClient(MONGO_URL)[DB_NAME]
+    pid = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    db.projects.insert_one({"id": pid, "name": "TEST_worker_deploy", "classes": ["widget"], "created_at": now})
+
+    prod = "/srv/models/prod.pt"
+    fs_fns = _make_fake_remote_fs()
+    fs = fs_fns[0]
+    fs[prod] = b"ORIGINAL_LIVE_MODEL"
+    object_store = {}
+
+    def fake_get_object(storage_path):
+        return object_store[storage_path], "application/octet-stream"
+
+    patchers = _patch_ssh_fs(fs_fns)
+    try:
+        for p in patchers:
+            p.start()
+        with patch("deployment_worker.ssh_helper.connect") as mock_connect:
+            mock_connect.return_value.__enter__.return_value = MagicMock()
+            mock_connect.return_value.__exit__.return_value = False
+
+            # --- Deploy A: nothing backed up yet ---
+            rid_a, mid_a, weights_a = _seed_deployable_run(db, pid)
+            object_store[weights_a] = b"MODEL_A"
+            deployment_worker._pipeline_deploying_sync(
+                rid_a, pid, 0, {**_DEPLOY_REQ_BASE, "remote_production_model_path": prod}, fake_get_object,
+            )
+            assert fs[prod] == b"MODEL_A"
+            assert fs[f"{prod}.bak1"] == b"ORIGINAL_LIVE_MODEL"
+            assert f"{prod}.bak2" not in fs
+            run_a = db.pipeline_runs.find_one({"id": rid_a})
+            assert run_a["status"] == "completed"
+            assert run_a["deploy"]["current_became_bak1"] is True
+            assert run_a["deploy"]["bak1_became_bak2"] is False
+            assert run_a["deploy"]["bak2_dropped"] is False
+            assert db.models.find_one({"id": mid_a})["is_active"] is True
+
+            # --- Deploy B: full three-way rotation ---
+            rid_b, mid_b, weights_b = _seed_deployable_run(db, pid)
+            object_store[weights_b] = b"MODEL_B"
+            deployment_worker._pipeline_deploying_sync(
+                rid_b, pid, 0, {**_DEPLOY_REQ_BASE, "remote_production_model_path": prod}, fake_get_object,
+            )
+            assert fs[prod] == b"MODEL_B"
+            assert fs[f"{prod}.bak1"] == b"MODEL_A"
+            assert fs[f"{prod}.bak2"] == b"ORIGINAL_LIVE_MODEL"
+            run_b = db.pipeline_runs.find_one({"id": rid_b})
+            assert run_b["deploy"]["current_became_bak1"] is True
+            assert run_b["deploy"]["bak1_became_bak2"] is True
+            assert run_b["deploy"]["bak2_dropped"] is False
+            # B's activation deactivates A
+            assert db.models.find_one({"id": mid_a})["is_active"] is False
+            assert db.models.find_one({"id": mid_b})["is_active"] is True
+
+            # --- Rollback: single swap, no .bak2 cascade ---
+            rid_r = str(uuid.uuid4())
+            db.pipeline_runs.insert_one({
+                "id": rid_r, "project_id": pid, "pipeline_id": str(uuid.uuid4()),
+                "run_type": "rollback", "status": "deploying", "busy": True,
+                "stage_history": [{"stage": "deploying", "status": "running", "started_at": now}],
+                "created_at": now, "updated_at": now,
+            })
+            deployment_worker._pipeline_rollback_sync(
+                rid_r, pid, 0, {**_DEPLOY_REQ_BASE, "remote_production_model_path": prod},
+            )
+            assert fs[prod] == b"MODEL_A"  # restored to what B overwrote
+            assert fs[f"{prod}.bak1"] == b"MODEL_B"  # what was overwritten is now backed up
+            assert fs[f"{prod}.bak2"] == b"ORIGINAL_LIVE_MODEL"  # untouched - no cascade
+            run_r = db.pipeline_runs.find_one({"id": rid_r})
+            assert run_r["status"] == "completed"
+            assert run_r["deploy"] == {"rolled_back": True, "deployed_at": run_r["deploy"]["deployed_at"]}
+            # Rollback does not touch local activation state (ROADMAP.md SS3)
+            assert db.models.find_one({"id": mid_b})["is_active"] is True
+    finally:
+        for p in patchers:
+            p.stop()
+        db.projects.delete_one({"id": pid})
+        db.models.delete_many({"project_id": pid})
+        db.pipeline_runs.delete_many({"project_id": pid})
+
+
+def test_deploying_without_candidate_model_fails():
+    db = MongoClient(MONGO_URL)[DB_NAME]
+    pid = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    db.projects.insert_one({"id": pid, "name": "TEST_worker_deploy_nocand", "classes": [], "created_at": now})
+    rid = str(uuid.uuid4())
+    db.pipeline_runs.insert_one({
+        "id": rid, "project_id": pid, "pipeline_id": str(uuid.uuid4()),
+        "run_type": "fresh_production", "status": "awaiting_approval", "busy": True,
+        "stage_history": [{"stage": "deploying", "status": "running", "started_at": now}],
+        "created_at": now, "updated_at": now,
+    })
+    try:
+        with patch("deployment_worker.ssh_helper.connect") as mock_connect:
+            deployment_worker._pipeline_deploying_sync(
+                rid, pid, 0, {**_DEPLOY_REQ_BASE, "remote_production_model_path": "/srv/models/prod.pt"},
+                lambda *a: (b"x", "application/octet-stream"),
+            )
+            mock_connect.assert_not_called()
+        run = db.pipeline_runs.find_one({"id": rid})
+        assert run["status"] == "failed"
+        assert "downloading_model" in run["error"]
+    finally:
+        db.projects.delete_one({"id": pid})
+        db.pipeline_runs.delete_one({"id": rid})
+
+
+def test_rollback_without_bak1_fails_and_writes_nothing():
+    db = MongoClient(MONGO_URL)[DB_NAME]
+    pid = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    db.projects.insert_one({"id": pid, "name": "TEST_worker_rollback_nobak", "classes": [], "created_at": now})
+    rid = str(uuid.uuid4())
+    db.pipeline_runs.insert_one({
+        "id": rid, "project_id": pid, "pipeline_id": str(uuid.uuid4()),
+        "run_type": "rollback", "status": "deploying", "busy": True,
+        "stage_history": [{"stage": "deploying", "status": "running", "started_at": now}],
+        "created_at": now, "updated_at": now,
+    })
+    fs_fns = _make_fake_remote_fs()
+    fs = fs_fns[0]
+    prod = "/srv/models/prod.pt"
+    fs[prod] = b"CURRENT"
+    patchers = _patch_ssh_fs(fs_fns)
+    try:
+        for p in patchers:
+            p.start()
+        with patch("deployment_worker.ssh_helper.connect") as mock_connect:
+            mock_connect.return_value.__enter__.return_value = MagicMock()
+            mock_connect.return_value.__exit__.return_value = False
+            deployment_worker._pipeline_rollback_sync(
+                rid, pid, 0, {**_DEPLOY_REQ_BASE, "remote_production_model_path": prod},
+            )
+        run = db.pipeline_runs.find_one({"id": rid})
+        assert run["status"] == "failed"
+        assert "roll back" in run["error"]
+        assert fs[prod] == b"CURRENT"  # untouched
+    finally:
+        for p in patchers:
+            p.stop()
+        db.projects.delete_one({"id": pid})
+        db.pipeline_runs.delete_one({"id": rid})

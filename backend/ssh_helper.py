@@ -143,6 +143,37 @@ def _ensure_remote_dir(sftp: paramiko.SFTPClient, remote_dir: str) -> None:
             sftp.mkdir(current)
 
 
+def remote_exists(client: paramiko.SSHClient, path: str) -> bool:
+    sftp = client.open_sftp()
+    try:
+        sftp.stat(path)
+        return True
+    except FileNotFoundError:
+        return False
+    finally:
+        sftp.close()
+
+
+def remote_remove(client: paramiko.SSHClient, path: str) -> None:
+    sftp = client.open_sftp()
+    try:
+        sftp.remove(path)
+    finally:
+        sftp.close()
+
+
+def remote_rename(client: paramiko.SSHClient, old_path: str, new_path: str) -> None:
+    """Plain SFTP rename (SSH_FXP_RENAME, SFTPv3) errors if new_path already
+    exists - unlike a POSIX mv, this cannot silently overwrite a destination.
+    Callers doing backup rotation must remote_remove() the destination first
+    if it might already exist."""
+    sftp = client.open_sftp()
+    try:
+        sftp.rename(old_path, new_path)
+    finally:
+        sftp.close()
+
+
 def upload_file(client: paramiko.SSHClient, local_path: str, remote_path: str,
                  callback: Optional[Callable[[int, int], None]] = None) -> None:
     sftp = client.open_sftp()

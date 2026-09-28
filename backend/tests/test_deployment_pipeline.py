@@ -2,8 +2,8 @@
 guard (M0), the split-export format (M2), the class_check stage (M3), the
 uploading_data stage's backgrounding/concurrency-guard/failure path (M4),
 the training_remote stage's failure/concurrency-guard path (M5), and the
-downloading_model stage's failure/validation path (M6), and the testing
-stage's precondition-failure path (M7).
+downloading_model stage's failure/validation path (M6), the testing stage's
+precondition-failure path (M7), and approve/reject/rollback (M8).
 
 Live-HTTP integration tests, following the same idiom as
 test_iteration9_new_endpoints.py / test_iteration11_routers_nudge_obb.py: real
@@ -19,6 +19,7 @@ import os
 import time
 import uuid
 import zipfile
+from datetime import datetime, timezone
 from io import BytesIO
 
 import pytest
@@ -36,12 +37,6 @@ DB_NAME = os.environ["DB_NAME"]
 
 DEMO_EMAIL = os.environ.get("TEST_DEMO_EMAIL", "admin@tneuralai.com")
 DEMO_PASSWORD = os.environ.get("TEST_DEMO_PASSWORD", "tneural123")
-
-# Mirrors routers/deployment.py's STUB_STAGE_DELAY_SECONDS; a real (not
-# instant) busy window is what makes the concurrency test deterministic
-# rather than a race, per M0's design.
-STUB_STAGE_DELAY_SECONDS = 1.5
-STAGE_WAIT_BUFFER = 1.0
 
 
 @pytest.fixture(scope="module")
@@ -81,6 +76,7 @@ def fresh_project(hdr, db):
     pid = r.json()["id"]
     yield pid
     db.projects.delete_one({"id": pid})
+    db.models.delete_many({"project_id": pid})
     pipeline = db.deployment_pipelines.find_one({"project_id": pid})
     if pipeline:
         db.pipeline_runs.delete_many({"pipeline_id": pipeline["id"]})
@@ -93,21 +89,6 @@ def _create_run(hdr, pid):
     return r.json()
 
 
-def _create_merge_run(hdr, pid, db):
-    """After M7, `deploying` is the only stage left as a generic stub, and
-    it's blocked on bootstrap runs (M0's own guard) - every fresh project's
-    first run defaults to run_type "bootstrap", so tests that want to use a
-    stub stage as an arbitrary placeholder need a non-bootstrap run instead.
-    Creates and completes a first run, then creates a second - the second's
-    run_type is "merge" per the run-creation endpoint's own placeholder
-    derivation (bootstrap iff no prior completed run exists)."""
-    first = _create_run(hdr, pid)
-    db.pipeline_runs.update_one({"id": first["id"]}, {"$set": {"status": "completed"}})
-    run = _create_run(hdr, pid)
-    assert run["run_type"] == "merge"
-    return run
-
-
 def test_create_pipeline_run(hdr, fresh_project):
     run = _create_run(hdr, fresh_project)
     assert run["status"] == "draft"
@@ -117,44 +98,20 @@ def test_create_pipeline_run(hdr, fresh_project):
     assert run["stage_history"] == []
 
 
-def test_stage_call_marks_busy_then_clears(hdr, fresh_project, db):
-    """Uses deploying (via _create_merge_run), the one stage still left as a
-    generic stub as of M7 - every other stage graduated to a real one with
-    its own request-body validation, so a still-generic stub stage (on a
-    non-bootstrap run, since deploying is blocked on bootstrap runs) is
-    needed here to exercise M0's original stub mechanism."""
-    run = _create_merge_run(hdr, fresh_project, db)
-    rid = run["id"]
-
-    r = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/deploying", headers=hdr)
-    assert r.status_code == 200, r.text
-    assert r.json()["busy"] is True
-
-    r = requests.get(f"{BASE_URL}/pipeline/runs/{rid}", headers=hdr)
-    assert r.status_code == 200
-    assert r.json()["busy"] is True
-
-    time.sleep(STUB_STAGE_DELAY_SECONDS + STAGE_WAIT_BUFFER)
-
-    r = requests.get(f"{BASE_URL}/pipeline/runs/{rid}", headers=hdr)
-    assert r.status_code == 200
-    body = r.json()
-    assert body["busy"] is False
-    assert body["stage_history"][0]["status"] == "stub_complete"
-
-
 def test_concurrent_stage_call_rejected(hdr, fresh_project, db):
-    """The M0 DoD test: two rapid stage calls on the same pipeline_id, second
-    gets 409. Uses deploying (still a generic stub, via _create_merge_run)
-    for the same reason as test_stage_call_marks_busy_then_clears above."""
-    run = _create_merge_run(hdr, fresh_project, db)
+    """The M0 DoD test: a stage call is rejected while the pipeline is
+    already busy. Directly seeds busy: True via Mongo rather than relying on
+    a real stage call's own timing - as of M8, every stage is real (no
+    generic stub left with an artificial delay), so there's no stage whose
+    busy window is reliably slow enough to race a second HTTP call against.
+    Seeding the state directly is simpler and doesn't depend on any stage's
+    behavior at all - it only exercises the shared guard itself."""
+    run = _create_run(hdr, fresh_project)
     rid = run["id"]
+    db.pipeline_runs.update_one({"id": rid}, {"$set": {"busy": True}})
 
-    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/deploying", headers=hdr)
-    assert r1.status_code == 200, r1.text
-
-    r2 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/class_check", headers=hdr)
-    assert r2.status_code == 409, r2.text
+    r = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/class_check", headers=hdr)
+    assert r.status_code == 409, r.text
 
 
 def test_unknown_stage_rejected(hdr, fresh_project):
@@ -344,18 +301,13 @@ def test_uploading_data_stage_respects_concurrency_guard(hdr, fresh_project, db)
     """A real closed-port connection refusal on loopback can resolve in
     under a millisecond - racing it against a second HTTP round-trip from
     this test process is not reliably observable (confirmed: flaked under
-    load). Instead, use the same reliable mechanism M0's own concurrency
-    test already established: the generic stub's fixed delay gives a wide,
-    deterministic busy window. Calling uploading_data as the SECOND stage
-    (rather than the first, like M0's test) confirms uploading_data's new
-    branch is dispatched after the shared guard check, not before it.
-    Uses deploying (via _create_merge_run) as the stub-stage placeholder -
-    see _create_merge_run's docstring for why a plain bootstrap run won't do."""
-    run = _create_merge_run(hdr, fresh_project, db)
+    load), and as of M8 no stage has an artificial delay left to race
+    against anyway. Directly seeds busy: True instead (same fix as M0's own
+    concurrency test above) - this confirms uploading_data's branch is
+    dispatched after the shared guard check, not before it."""
+    run = _create_run(hdr, fresh_project)
     rid = run["id"]
-
-    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/deploying", headers=hdr)
-    assert r1.status_code == 200, r1.text
+    db.pipeline_runs.update_one({"id": rid}, {"$set": {"busy": True}})
 
     r2 = requests.post(
         f"{BASE_URL}/pipeline/runs/{rid}/stage/uploading_data",
@@ -405,14 +357,10 @@ def test_training_remote_stage_without_dataset_export_fails(hdr, fresh_project):
 
 
 def test_training_remote_stage_respects_concurrency_guard(hdr, fresh_project, db):
-    """Same reliable mechanism as uploading_data's concurrency test: the
-    generic stub's fixed delay gives a wide, deterministic busy window.
-    Uses deploying (via _create_merge_run) as the stub-stage placeholder."""
-    run = _create_merge_run(hdr, fresh_project, db)
+    """Same direct busy-seed mechanism as uploading_data's concurrency test above."""
+    run = _create_run(hdr, fresh_project)
     rid = run["id"]
-
-    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/deploying", headers=hdr)
-    assert r1.status_code == 200, r1.text
+    db.pipeline_runs.update_one({"id": rid}, {"$set": {"busy": True}})
 
     r2 = requests.post(
         f"{BASE_URL}/pipeline/runs/{rid}/stage/training_remote",
@@ -508,3 +456,93 @@ def test_testing_stage_without_candidate_model_fails(hdr, fresh_project):
     assert body["busy"] is False
     assert body["status"] == "failed"
     assert "downloading_model" in body["error"]
+
+
+# --- M8: approve / reject / rollback ------------------------------------------
+
+def _seed_awaiting_approval_run(db, pid, rid, run_type="bootstrap", with_candidate=True):
+    now = datetime.now(timezone.utc).isoformat()
+    update = {"status": "awaiting_approval", "run_type": run_type, "updated_at": now}
+    if with_candidate:
+        mid = str(uuid.uuid4())
+        weights_path = f"visionforge/projects/{pid}/pipeline_runs/{rid}/candidate.pt"
+        db.models.insert_one({
+            "id": mid, "project_id": pid, "type": "pipeline_candidate", "is_active": False,
+            "weights_path": weights_path, "created_at": now,
+        })
+        update["candidate_model"] = {"local_model_id": mid, "weights_path": weights_path, "metrics": {}}
+    db.pipeline_runs.update_one({"id": rid}, {"$set": update})
+    return update.get("candidate_model", {}).get("local_model_id")
+
+
+def test_approve_on_wrong_status_rejected(hdr, fresh_project):
+    run = _create_run(hdr, fresh_project)  # status: draft
+    r = requests.post(f"{BASE_URL}/pipeline/runs/{run['id']}/approve", headers=hdr)
+    assert r.status_code == 409, r.text
+
+
+def test_reject_on_wrong_status_rejected(hdr, fresh_project):
+    run = _create_run(hdr, fresh_project)  # status: draft
+    r = requests.post(f"{BASE_URL}/pipeline/runs/{run['id']}/reject", headers=hdr)
+    assert r.status_code == 409, r.text
+
+
+def test_bootstrap_approve_activates_locally_and_completes(hdr, fresh_project, db):
+    """No SSH involved at all for a bootstrap approval, so this can run live
+    without a real remote host - the local-only activation branch."""
+    run = _create_run(hdr, fresh_project)
+    assert run["run_type"] == "bootstrap"
+    mid = _seed_awaiting_approval_run(db, fresh_project, run["id"], run_type="bootstrap")
+
+    r = requests.post(f"{BASE_URL}/pipeline/runs/{run['id']}/approve", headers=hdr)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "completed"
+    assert body["approval"]["decision"] == "approved"
+
+    model = db.models.find_one({"id": mid})
+    assert model["is_active"] is True
+
+
+def test_reject_sets_terminal_status_and_makes_no_ssh_calls(hdr, fresh_project, db):
+    """No credentials are supplied anywhere in this test - if reject made any
+    SSH attempt, it would need connection details it was never given and
+    would fail; instead it just succeeds, proving the zero-SSH-calls DoD
+    structurally (no ssh_helper import exists in the reject handler at all)."""
+    run = _create_run(hdr, fresh_project)
+    _seed_awaiting_approval_run(db, fresh_project, run["id"], with_candidate=False)
+
+    r = requests.post(f"{BASE_URL}/pipeline/runs/{run['id']}/reject", headers=hdr, json={"note": "not good enough"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "rejected"
+    assert body["approval"]["decision"] == "rejected"
+    assert body["approval"]["note"] == "not good enough"
+
+
+def test_deploying_without_approval_rejected(hdr, fresh_project, db):
+    run = _create_run(hdr, fresh_project)  # bootstrap by default
+    # Force fresh_production so the bootstrap-block guard doesn't shadow the
+    # approval-required guard this test is actually targeting.
+    db.pipeline_runs.update_one({"id": run["id"]}, {"$set": {"run_type": "fresh_production"}})
+
+    r = requests.post(
+        f"{BASE_URL}/pipeline/runs/{run['id']}/stage/deploying",
+        headers=hdr,
+        json={"host": "127.0.0.1", "port": 1, "username": "nobody", "password": "x",
+              "remote_production_model_path": "/srv/models/prod.pt"},
+    )
+    assert r.status_code == 400, r.text
+    assert "approved" in r.text.lower()
+
+
+def test_rollback_without_deployment_pipeline_fails(hdr, fresh_project):
+    """A project that has never created a single pipeline run has no
+    deployment_pipelines doc yet - nothing to roll back from."""
+    r = requests.post(
+        f"{BASE_URL}/projects/{fresh_project}/pipeline/rollback",
+        headers=hdr,
+        json={"host": "127.0.0.1", "port": 1, "username": "nobody", "password": "x",
+              "remote_production_model_path": "/srv/models/prod.pt"},
+    )
+    assert r.status_code == 400, r.text

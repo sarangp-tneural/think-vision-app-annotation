@@ -62,3 +62,18 @@ class DownloadingModelRequest(SSHCredentials):
     fields beyond SSHCredentials - the remote run dir, run name, and
     metrics.json path are all read back from what training_remote (M5)
     already stored on the run doc, not re-supplied here."""
+
+
+class DeployingRequest(SSHCredentials):
+    """Body for POST /pipeline/runs/{rid}/stage/deploying. Same
+    self-contained-per-request rationale as every prior stage schema:
+    deployment_pipelines.remote_production_model_path is still unconfigured
+    (no flow before M9)."""
+
+    remote_production_model_path: str
+
+
+class RollbackRequest(SSHCredentials):
+    """Body for POST /projects/{pid}/pipeline/rollback."""
+
+    remote_production_model_path: str

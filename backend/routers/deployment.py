@@ -12,10 +12,13 @@ regex-scraping its stdout. M6 wires in `downloading_model`, which SFTP-
 downloads the trained weights + metrics and registers a `pipeline_candidate`
 models doc. M7 wires in `testing`, which needs no SSH at all - it runs local
 inference/evaluation against object storage and the currently-active model,
-then notifies reviewers. Only `deploying` still runs through the stub, until
-M8 replaces it. approve/reject/rollback/run-history endpoints are
-deliberately not built here (M8/M9's job) since their semantics aren't
-designed yet.
+then notifies reviewers. M8 wires in the last stage, `deploying` (the
+highest-risk milestone in the feature - destructive, non-idempotent remote
+file rotation), plus the `approve`/`reject`/`rollback` endpoints that gate
+it. Every stage in `VALID_STAGES` now has real logic - M0's generic
+stub-stage fallback has been fully retired, not left as dead code.
+run-history endpoints are deliberately not built here (M9's job) since their
+semantics aren't designed yet.
 """
 import asyncio
 import shlex
@@ -30,7 +33,9 @@ import pipeline_logic
 import ssh_helper
 from schemas.deployment import (
     ClassCheckRequest,
+    DeployingRequest,
     DownloadingModelRequest,
+    RollbackRequest,
     TrainingRemoteRequest,
     UploadingDataRequest,
 )
@@ -45,13 +50,6 @@ VALID_STAGES = {
     "testing",
     "deploying",
 }
-
-# M0 placeholder only, still used by every stage except class_check: no real
-# stage logic exists for them yet, so a stage call has nothing blocking to do.
-# This delay just gives the busy window enough width to be deterministically
-# observable (see test_concurrent_stage_call_rejected). Replaced stage-by-stage
-# by real BackgroundTasks/thread workers in M4-M8.
-STUB_STAGE_DELAY_SECONDS = 1.5
 
 
 def _fetch_remote_yaml_sync(req: ClassCheckRequest) -> str:
@@ -159,6 +157,9 @@ def register(s):
 
         if stage == "deploying" and run.get("run_type") == "bootstrap":
             raise HTTPException(status_code=400, detail="Bootstrap runs cannot deploy")
+
+        if stage == "deploying" and run.get("approval", {}).get("decision") != "approved":
+            raise HTTPException(status_code=400, detail="Run must be approved before deploying")
 
         busy_run = await db.pipeline_runs.find_one(
             {"pipeline_id": run["pipeline_id"], "busy": True}, {"id": 1}
@@ -284,22 +285,134 @@ def register(s):
             background.add_task(_job)
             return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
 
-        async def _stub_stage_job():
-            await asyncio.sleep(STUB_STAGE_DELAY_SECONDS)
-            finished = datetime.now(timezone.utc).isoformat()
-            await db.pipeline_runs.update_one(
-                {"id": rid},
-                {
-                    "$set": {
-                        "busy": False,
-                        "updated_at": finished,
-                        f"stage_history.{history_index}.status": "stub_complete",
-                        f"stage_history.{history_index}.finished_at": finished,
-                    }
+        # stage == "deploying" - the only remaining branch, guarded above by
+        # both the bootstrap-block (M0) and the approval-required check.
+        try:
+            req = DeployingRequest(**body)
+        except ValidationError as e:
+            await db.pipeline_runs.update_one({"id": rid}, {"$set": {"busy": False}})
+            raise HTTPException(status_code=400, detail=f"Invalid deploying request: {e}")
+
+        async def _job():
+            await asyncio.to_thread(
+                deployment_worker._pipeline_deploying_sync,
+                rid, run["project_id"], history_index, req.model_dump(), s.get_object,
+            )
+        background.add_task(_job)
+        return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
+
+    @router.post("/pipeline/runs/{rid}/approve")
+    async def approve_pipeline_run(rid: str, current=Depends(get_current_user),
+                                    body: dict = Body(default_factory=dict)):
+        run = await db.pipeline_runs.find_one({"id": rid})
+        if not run:
+            raise HTTPException(status_code=404, detail="Not found")
+        await s._project_access_check(run["project_id"], current["id"], roles=["owner", "admin"])
+        if run.get("status") != "awaiting_approval":
+            raise HTTPException(status_code=409, detail=f"Run is not awaiting approval (status: {run.get('status')})")
+
+        now = datetime.now(timezone.utc).isoformat()
+        approval = {
+            "decision": "approved", "decided_by": current["id"],
+            "decided_at": now, "note": body.get("note"),
+        }
+        update = {"approval": approval, "updated_at": now}
+
+        if run.get("run_type") == "bootstrap":
+            # stage/deploying is permanently blocked for bootstrap runs (M0's
+            # guard) - this is the only path to a terminal state for one, so
+            # the local-only activation happens here, not in a deploying
+            # stage call. Replicates POST /models/{mid}/activate's exact
+            # writes (routers/training.py:64-77), not an HTTP self-call - see
+            # deployment_worker._pipeline_deploying_sync's docstring for why.
+            candidate = run.get("candidate_model") or {}
+            local_model_id = candidate.get("local_model_id")
+            if not local_model_id:
+                raise HTTPException(status_code=400, detail="No candidate_model on run - run downloading_model first")
+            await db.models.update_many({"project_id": run["project_id"]}, {"$set": {"is_active": False}})
+            await db.models.update_one({"id": local_model_id}, {"$set": {"is_active": True, "activated_at": now}})
+            update["status"] = "completed"
+
+        await db.pipeline_runs.update_one({"id": rid}, {"$set": update})
+        await s._log_activity(run["project_id"], current["id"], "pipeline_run_approved", {"run_id": rid})
+        return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
+
+    @router.post("/pipeline/runs/{rid}/reject")
+    async def reject_pipeline_run(rid: str, current=Depends(get_current_user),
+                                   body: dict = Body(default_factory=dict)):
+        # Makes zero SSH calls by construction - no ssh_helper import needed
+        # in this handler at all.
+        run = await db.pipeline_runs.find_one({"id": rid})
+        if not run:
+            raise HTTPException(status_code=404, detail="Not found")
+        await s._project_access_check(run["project_id"], current["id"], roles=["owner", "admin"])
+        if run.get("status") != "awaiting_approval":
+            raise HTTPException(status_code=409, detail=f"Run is not awaiting approval (status: {run.get('status')})")
+
+        now = datetime.now(timezone.utc).isoformat()
+        await db.pipeline_runs.update_one(
+            {"id": rid},
+            {"$set": {
+                "status": "rejected",
+                "approval": {
+                    "decision": "rejected", "decided_by": current["id"],
+                    "decided_at": now, "note": body.get("note"),
                 },
+                "updated_at": now,
+            }},
+        )
+        await s._log_activity(run["project_id"], current["id"], "pipeline_run_rejected", {"run_id": rid})
+        return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
+
+    @router.post("/projects/{pid}/pipeline/rollback")
+    async def rollback_pipeline(pid: str, background: BackgroundTasks, current=Depends(get_current_user),
+                                 body: dict = Body(default_factory=dict)):
+        await s._project_access_check(pid, current["id"], roles=["owner", "admin"])
+        try:
+            req = RollbackRequest(**body)
+        except ValidationError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid rollback request: {e}")
+
+        pipeline = await db.deployment_pipelines.find_one({"project_id": pid})
+        if not pipeline:
+            raise HTTPException(status_code=400, detail="No deployment pipeline exists for this project yet")
+
+        busy_run = await db.pipeline_runs.find_one(
+            {"pipeline_id": pipeline["id"], "busy": True}, {"id": 1}
+        )
+        if busy_run:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Pipeline busy: run {busy_run['id']} is currently in progress",
             )
 
-        background.add_task(_stub_stage_job)
+        now = datetime.now(timezone.utc).isoformat()
+        rid = str(uuid.uuid4())
+        # run_type forced directly, bypassing create_pipeline_run's
+        # auto-detection (which doesn't know about rollback at all) - modeled
+        # as its own pipeline_runs doc jumping straight to deploying, per
+        # ROADMAP.md SS3.
+        run = {
+            "id": rid,
+            "project_id": pid,
+            "pipeline_id": pipeline["id"],
+            "run_type": "rollback",
+            "status": "deploying",
+            "busy": True,
+            "stage_history": [{"stage": "deploying", "status": "running", "started_at": now}],
+            "created_at": now,
+            "updated_at": now,
+        }
+        await db.pipeline_runs.insert_one(run)
+        await db.deployment_pipelines.update_one(
+            {"id": pipeline["id"]}, {"$set": {"last_run_id": rid, "updated_at": now}}
+        )
 
-        updated = await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
-        return updated
+        async def _job():
+            await asyncio.to_thread(
+                deployment_worker._pipeline_rollback_sync, rid, pid, 0, req.model_dump(),
+            )
+        background.add_task(_job)
+        await s._log_activity(pid, current["id"], "pipeline_rollback_started", {"run_id": rid})
+        run.pop("_id", None)
+        return run
