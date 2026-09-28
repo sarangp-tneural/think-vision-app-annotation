@@ -4,13 +4,12 @@
 M0 stood up enough of a `pipeline_runs`/`deployment_pipelines` skeleton to
 make the cross-run concurrency guard real and testable, with every stage
 running through a generic stub. M3 wired in the first real (synchronous)
-stage, `class_check`. M4 wires in `uploading_data`, the first stage that does
-genuinely long-running work (build the split dataset dir, SCP it to the
-remote host) and so is the first to use a real background-thread worker
-(`deployment_worker.py`, mirroring `_train_yolo_sync`'s pattern) instead of
-either the synchronous-inline shortcut `class_check` uses or the generic
-stub. The remaining three stages (`training_remote`, `downloading_model`,
-`testing`, `deploying`) still run through the stub until M5-M8 replace them
+stage, `class_check`. M4 wired in `uploading_data`, the first stage to use a
+real background-thread worker (`deployment_worker.py`, mirroring
+`_train_yolo_sync`'s pattern). M5 wires in `training_remote`, which renders
+and runs a remote training/eval script and streams live progress back by
+regex-scraping its stdout. The remaining three stages (`downloading_model`,
+`testing`, `deploying`) still run through the stub until M6-M8 replace them
 one at a time. approve/reject/rollback/run-history endpoints are deliberately
 not built here (M8/M9's job) since their semantics aren't designed yet.
 """
@@ -25,7 +24,7 @@ from pydantic import ValidationError
 import deployment_worker
 import pipeline_logic
 import ssh_helper
-from schemas.deployment import ClassCheckRequest, UploadingDataRequest
+from schemas.deployment import ClassCheckRequest, TrainingRemoteRequest, UploadingDataRequest
 
 router = APIRouter()
 
@@ -230,6 +229,21 @@ def register(s):
                 await asyncio.to_thread(
                     deployment_worker._pipeline_uploading_data_sync,
                     rid, run["project_id"], history_index, req.model_dump(), s.get_object,
+                )
+            background.add_task(_job)
+            return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
+
+        if stage == "training_remote":
+            try:
+                req = TrainingRemoteRequest(**body)
+            except ValidationError as e:
+                await db.pipeline_runs.update_one({"id": rid}, {"$set": {"busy": False}})
+                raise HTTPException(status_code=400, detail=f"Invalid training_remote request: {e}")
+
+            async def _job():
+                await asyncio.to_thread(
+                    deployment_worker._pipeline_training_remote_sync,
+                    rid, run["project_id"], history_index, req.model_dump(),
                 )
             background.add_task(_job)
             return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})

@@ -1,7 +1,7 @@
-"""Unit tests for deployment_worker.py: calls _pipeline_uploading_data_sync
+"""Unit tests for deployment_worker.py: calls its _pipeline_*_sync functions
 directly (no live server, no HTTP) with ssh_helper mocked (matching
-test_ssh_helper.py's style) and a fake get_object_fn (no real object
-storage), but against a REAL local MongoDB connection (matching
+test_ssh_helper.py's style) and, for uploading_data, a fake get_object_fn (no
+real object storage) - but against a REAL local MongoDB connection (matching
 test_deployment_pipeline.py's style) to seed a projects/pipeline_runs doc
 beforehand and assert the actual written fields afterward. This is the
 natural continuation of test_deployment_pipeline.py's own stated split: pure/
@@ -120,5 +120,152 @@ def test_uploading_data_connection_failure_marks_run_failed():
         assert "boom" in run["error"]
         assert "dataset_export" not in run
         assert run["stage_history"][0]["status"] == "failed"
+    finally:
+        _cleanup(db, pid, rid)
+
+
+# --- _pipeline_training_remote_sync() (M5) ----------------------------------
+
+def _seed_run_with_dataset_export(db, run_type="bootstrap"):
+    pid = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    db.projects.insert_one({"id": pid, "name": "TEST_worker_training", "classes": ["widget"], "created_at": now})
+    rid = str(uuid.uuid4())
+    db.pipeline_runs.insert_one({
+        "id": rid, "project_id": pid, "pipeline_id": str(uuid.uuid4()),
+        "run_type": run_type, "status": "training_remote", "busy": True,
+        "dataset_export": {
+            "train_count": 7, "valid_count": 2, "test_count": 1, "test_image_ids": [],
+            "remote_upload_path": f"/srv/work/{rid}/dataset",
+        },
+        "stage_history": [{"stage": "training_remote", "status": "running", "started_at": now}],
+        "created_at": now, "updated_at": now,
+    })
+    return pid, rid
+
+
+_BASE_REQ = {
+    "host": "example.com", "port": 22, "username": "u", "pem_key": None, "password": "p",
+    "remote_workdir": "/srv/work", "remote_base_model_path": "/models/base.pt",
+    "remote_production_model_path": None, "epochs": 3,
+}
+
+
+def test_training_remote_streams_progress_and_completes():
+    db = MongoClient(MONGO_URL)[DB_NAME]
+    pid, rid = _seed_run_with_dataset_export(db, run_type="bootstrap")
+    try:
+        mock_client = MagicMock()
+        snapshots = []
+
+        def fake_exec_streaming(client, cmd, on_output=None, **kwargs):
+            for i in range(1, 4):
+                on_output(f"{i}/3      0G   0.5   0.3   0.1        12       640\n")
+                snapshots.append(db.pipeline_runs.find_one({"id": rid})["training"]["current_epoch"])
+            return 0, "", ""
+
+        with patch("deployment_worker.ssh_helper.connect") as mock_connect, \
+             patch("deployment_worker.ssh_helper.upload_file") as mock_upload_file, \
+             patch("deployment_worker.ssh_helper.exec_command_streaming", side_effect=fake_exec_streaming) as mock_exec:
+            mock_connect.return_value.__enter__.return_value = mock_client
+            mock_connect.return_value.__exit__.return_value = False
+
+            deployment_worker._pipeline_training_remote_sync(rid, pid, 0, _BASE_REQ)
+
+            mock_upload_file.assert_called_once()
+            assert mock_upload_file.call_args.args[0] is mock_client
+            assert mock_upload_file.call_args.args[2] == f"/srv/work/{rid}/train_eval.py"
+            mock_exec.assert_called_once()
+            assert mock_exec.call_args.args[1] == f"python3 /srv/work/{rid}/train_eval.py"
+
+        # Each epoch line triggered its own, distinct Mongo write - not just
+        # a single write at the very end.
+        assert snapshots == [1, 2, 3]
+
+        run = db.pipeline_runs.find_one({"id": rid})
+        assert run["busy"] is False
+        assert run["training"]["progress_pct"] == 100
+        assert run["training"]["base_checkpoint_ref"] == "/models/base.pt"
+        assert run["training"]["remote_run_dir"] == f"/srv/work/{rid}/runs"
+        assert "3/3" in run["training"]["log_tail"]
+        assert run["stage_history"][0]["status"] == "succeeded"
+    finally:
+        _cleanup(db, pid, rid)
+
+
+def _run_training_remote_capturing_script(db, pid, rid, req):
+    """Runs _pipeline_training_remote_sync with SSH fully mocked, capturing
+    the local script's text before the function's own cleanup deletes it."""
+    captured = {}
+
+    def fake_upload_file(client, local_path, remote_path, **kwargs):
+        with open(local_path) as f:
+            captured["text"] = f.read()
+
+    def fake_exec_streaming(client, cmd, on_output=None, **kwargs):
+        return 0, "", ""
+
+    with patch("deployment_worker.ssh_helper.connect") as mock_connect, \
+         patch("deployment_worker.ssh_helper.upload_file", side_effect=fake_upload_file), \
+         patch("deployment_worker.ssh_helper.exec_command_streaming", side_effect=fake_exec_streaming):
+        mock_connect.return_value.__enter__.return_value = MagicMock()
+        mock_connect.return_value.__exit__.return_value = False
+        deployment_worker._pipeline_training_remote_sync(rid, pid, 0, req)
+
+    return captured.get("text", "")
+
+
+def test_training_remote_bootstrap_starts_from_base_checkpoint():
+    db = MongoClient(MONGO_URL)[DB_NAME]
+    pid, rid = _seed_run_with_dataset_export(db, run_type="bootstrap")
+    try:
+        script_text = _run_training_remote_capturing_script(db, pid, rid, _BASE_REQ)
+        assert "/models/base.pt" in script_text
+    finally:
+        _cleanup(db, pid, rid)
+
+
+def test_training_remote_merge_starts_from_production_checkpoint():
+    db = MongoClient(MONGO_URL)[DB_NAME]
+    pid, rid = _seed_run_with_dataset_export(db, run_type="merge")
+    try:
+        req = {**_BASE_REQ, "remote_production_model_path": "/models/prod.pt"}
+        script_text = _run_training_remote_capturing_script(db, pid, rid, req)
+        assert "/models/prod.pt" in script_text
+        assert "/models/base.pt" not in script_text
+    finally:
+        _cleanup(db, pid, rid)
+
+
+def test_training_remote_merge_without_production_path_fails():
+    db = MongoClient(MONGO_URL)[DB_NAME]
+    pid, rid = _seed_run_with_dataset_export(db, run_type="merge")
+    try:
+        deployment_worker._pipeline_training_remote_sync(rid, pid, 0, _BASE_REQ)  # no production path
+        run = db.pipeline_runs.find_one({"id": rid})
+        assert run["status"] == "failed"
+        assert "remote_production_model_path" in run["error"]
+    finally:
+        _cleanup(db, pid, rid)
+
+
+def test_training_remote_nonzero_exit_marks_run_failed():
+    db = MongoClient(MONGO_URL)[DB_NAME]
+    pid, rid = _seed_run_with_dataset_export(db, run_type="bootstrap")
+    try:
+        def fake_exec_streaming(client, cmd, on_output=None, **kwargs):
+            on_output("Traceback (most recent call last):\n")
+            return 1, "", ""
+
+        with patch("deployment_worker.ssh_helper.connect") as mock_connect, \
+             patch("deployment_worker.ssh_helper.upload_file"), \
+             patch("deployment_worker.ssh_helper.exec_command_streaming", side_effect=fake_exec_streaming):
+            mock_connect.return_value.__enter__.return_value = MagicMock()
+            mock_connect.return_value.__exit__.return_value = False
+            deployment_worker._pipeline_training_remote_sync(rid, pid, 0, _BASE_REQ)
+
+        run = db.pipeline_runs.find_one({"id": rid})
+        assert run["status"] == "failed"
+        assert "exited 1" in run["error"]
     finally:
         _cleanup(db, pid, rid)

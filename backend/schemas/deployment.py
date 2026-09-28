@@ -40,3 +40,18 @@ class UploadingDataRequest(SSHCredentials):
     train_pct: float = 0.7
     valid_pct: float = 0.2
     test_pct: float = 0.1
+
+
+class TrainingRemoteRequest(SSHCredentials):
+    """Body for POST /pipeline/runs/{rid}/stage/training_remote. Same
+    rationale as ClassCheckRequest/UploadingDataRequest:
+    deployment_pipelines.remote_base_model_path/remote_production_model_path
+    are still unconfigured (no flow before M9), so both come fresh per
+    request. remote_production_model_path is only required for merge runs -
+    checked in the worker, not here, since run_type isn't visible to this
+    schema."""
+
+    remote_workdir: str
+    remote_base_model_path: str
+    remote_production_model_path: Optional[str] = None
+    epochs: int = 10

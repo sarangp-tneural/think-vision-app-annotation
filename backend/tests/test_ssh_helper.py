@@ -129,6 +129,100 @@ def test_exec_command_returns_exit_code_and_streams():
     assert err == ""
 
 
+# --- exec_command_streaming() -----------------------------------------------
+
+class FakeChannel:
+    """Simulates paramiko.Channel's polling surface: exit_status_ready()
+    flips true after `ready_after` calls, letting tests control whether
+    streamed chunks arrive during the main poll loop or only show up in the
+    post-loop drain (the exit_status_ready-before-buffer-flushed case)."""
+
+    def __init__(self, stdout_chunks=(), stderr_chunks=(), exit_code=0, ready_after=1):
+        self._stdout_chunks = list(stdout_chunks)
+        self._stderr_chunks = list(stderr_chunks)
+        self._exit_code = exit_code
+        self._polls = 0
+        self._ready_after = ready_after
+
+    def exit_status_ready(self):
+        self._polls += 1
+        return self._polls > self._ready_after
+
+    def recv_ready(self):
+        return bool(self._stdout_chunks)
+
+    def recv(self, _n):
+        return self._stdout_chunks.pop(0)
+
+    def recv_stderr_ready(self):
+        return bool(self._stderr_chunks)
+
+    def recv_stderr(self, _n):
+        return self._stderr_chunks.pop(0)
+
+    def recv_exit_status(self):
+        return self._exit_code
+
+
+def _mock_client_for_streaming(channel):
+    mock_client = MagicMock()
+    mock_stdout = MagicMock()
+    mock_stdout.channel = channel
+    mock_client.exec_command.return_value = (MagicMock(), mock_stdout, MagicMock())
+    return mock_client
+
+
+def test_exec_command_streaming_delivers_chunks_via_callback():
+    channel = FakeChannel(stdout_chunks=[b"1/10\n", b"2/10\n", b"3/10\n"], exit_code=0, ready_after=5)
+    mock_client = _mock_client_for_streaming(channel)
+    received = []
+
+    exit_code, out, err = ssh_helper.exec_command_streaming(
+        mock_client, "python3 train.py", on_output=received.append, poll_interval=0.001,
+    )
+
+    assert received == ["1/10\n", "2/10\n", "3/10\n"]
+    assert out == "1/10\n2/10\n3/10\n"
+    assert exit_code == 0
+
+
+def test_exec_command_streaming_drains_buffer_after_exit_ready():
+    """exit_status_ready() true on the very first poll, but output is still
+    sitting in the channel buffer - the post-loop drain must still pick it
+    up (the paramiko gotcha this function's docstring calls out)."""
+    channel = FakeChannel(stdout_chunks=[b"4/10\n", b"5/10\n"], exit_code=0, ready_after=0)
+    mock_client = _mock_client_for_streaming(channel)
+    received = []
+
+    exit_code, out, err = ssh_helper.exec_command_streaming(
+        mock_client, "python3 train.py", on_output=received.append, poll_interval=0.001,
+    )
+
+    assert received == ["4/10\n", "5/10\n"]
+    assert out == "4/10\n5/10\n"
+
+
+def test_exec_command_streaming_captures_stderr_and_nonzero_exit():
+    channel = FakeChannel(stderr_chunks=[b"Traceback (most recent call last)\n"], exit_code=1, ready_after=0)
+    mock_client = _mock_client_for_streaming(channel)
+
+    exit_code, out, err = ssh_helper.exec_command_streaming(mock_client, "boom", poll_interval=0.001)
+
+    assert exit_code == 1
+    assert out == ""
+    assert err == "Traceback (most recent call last)\n"
+
+
+def test_exec_command_streaming_works_with_no_callback():
+    channel = FakeChannel(stdout_chunks=[b"ok\n"], exit_code=0, ready_after=0)
+    mock_client = _mock_client_for_streaming(channel)
+
+    exit_code, out, err = ssh_helper.exec_command_streaming(mock_client, "echo ok", poll_interval=0.001)
+
+    assert exit_code == 0
+    assert out == "ok\n"
+
+
 # --- upload_file() / download_file() ----------------------------------------
 
 def test_upload_file_creates_remote_dirs_then_puts():

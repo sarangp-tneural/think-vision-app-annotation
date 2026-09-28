@@ -8,6 +8,7 @@ import contextlib
 import io
 import os
 import stat
+import time
 from typing import Callable, Optional, Tuple
 
 import paramiko
@@ -76,6 +77,56 @@ def exec_command(client: paramiko.SSHClient, cmd: str,
         stdout.read().decode("utf-8", "replace"),
         stderr.read().decode("utf-8", "replace"),
     )
+
+
+def exec_command_streaming(client: paramiko.SSHClient, cmd: str,
+                            on_output: Optional[Callable[[str], None]] = None,
+                            timeout: Optional[float] = None,
+                            poll_interval: float = 0.5) -> Tuple[int, str, str]:
+    """Long-running command execution with incremental stdout delivery, for a
+    caller that wants to observe progress while the command is still running
+    (e.g. regex-scraping a remote training script's output) - exec_command
+    only returns once the command has fully finished. Still no domain
+    knowledge here (no regex/Mongo/Ultralytics awareness): on_output is a
+    plain callback receiving each decoded stdout chunk as it arrives.
+
+    Polls channel.exit_status_ready() rather than blocking on recv(), since a
+    plain blocking recv() would itself stall until more data arrives, which
+    defeats the purpose of interleaving output delivery with a liveness check.
+    After the loop, drains any output still sitting in the channel buffer - a
+    known paramiko gotcha where exit_status_ready() can flip true slightly
+    before the buffer is fully flushed.
+    """
+    stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
+    channel = stdout.channel
+    stdin.close()
+
+    stdout_chunks = []
+    stderr_chunks = []
+
+    def _drain_once() -> bool:
+        drained = False
+        while channel.recv_ready():
+            chunk = channel.recv(4096).decode("utf-8", "replace")
+            stdout_chunks.append(chunk)
+            if on_output:
+                on_output(chunk)
+            drained = True
+        while channel.recv_stderr_ready():
+            stderr_chunks.append(channel.recv_stderr(4096).decode("utf-8", "replace"))
+            drained = True
+        return drained
+
+    while not channel.exit_status_ready():
+        if not _drain_once():
+            time.sleep(poll_interval)
+    # exit_status_ready() can flip true before the buffer is fully flushed;
+    # keep draining until a pass picks up nothing new.
+    while _drain_once():
+        pass
+
+    exit_code = channel.recv_exit_status()
+    return exit_code, "".join(stdout_chunks), "".join(stderr_chunks)
 
 
 def _ensure_remote_dir(sftp: paramiko.SFTPClient, remote_dir: str) -> None:

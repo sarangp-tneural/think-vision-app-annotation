@@ -1,6 +1,7 @@
 """Deploy Pipeline tests: pipeline run creation and the stage concurrency
-guard (M0), the split-export format (M2), the class_check stage (M3), and the
-uploading_data stage's backgrounding/concurrency-guard/failure path (M4).
+guard (M0), the split-export format (M2), the class_check stage (M3), the
+uploading_data stage's backgrounding/concurrency-guard/failure path (M4), and
+the training_remote stage's failure/concurrency-guard path (M5).
 
 Live-HTTP integration tests, following the same idiom as
 test_iteration9_new_endpoints.py / test_iteration11_routers_nudge_obb.py: real
@@ -342,6 +343,72 @@ def test_uploading_data_stage_respects_concurrency_guard(hdr, fresh_project):
               "password": "irrelevant", "remote_workdir": "/srv/work"},
     )
     assert r2.status_code == 409, r2.text
+
+
+# --- M5: training_remote stage -----------------------------------------------
+
+def test_training_remote_stage_without_dataset_export_fails(hdr, fresh_project):
+    """This environment has no real SSH server to test against live, so
+    (mirroring uploading_data's failure test, which uses a real closed port)
+    this exercises a different, equally real failure mode instead: calling
+    training_remote before uploading_data has ever populated dataset_export.
+    The worker checks this and fails fast, before attempting any SSH
+    connection at all."""
+    run = _create_run(hdr, fresh_project)
+    rid = run["id"]
+
+    start = time.monotonic()
+    r1 = requests.post(
+        f"{BASE_URL}/pipeline/runs/{rid}/stage/training_remote",
+        headers=hdr,
+        json={
+            "host": "127.0.0.1",
+            "port": 1,
+            "username": "nobody",
+            "password": "irrelevant",
+            "remote_workdir": "/srv/work",
+            "remote_base_model_path": "/models/base.pt",
+        },
+    )
+    elapsed = time.monotonic() - start
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["busy"] is True
+    assert elapsed < 5, f"stage/training_remote should return immediately, took {elapsed:.2f}s"
+
+    time.sleep(1)
+    r = requests.get(f"{BASE_URL}/pipeline/runs/{rid}", headers=hdr)
+    body = r.json()
+    assert body["busy"] is False
+    assert body["status"] == "failed"
+    assert "uploading_data" in body["error"] or "dataset_export" in body["error"]
+
+
+def test_training_remote_stage_respects_concurrency_guard(hdr, fresh_project):
+    """Same reliable mechanism as uploading_data's concurrency test: the
+    generic stub's fixed delay gives a wide, deterministic busy window."""
+    run = _create_run(hdr, fresh_project)
+    rid = run["id"]
+
+    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/downloading_model", headers=hdr)
+    assert r1.status_code == 200, r1.text
+
+    r2 = requests.post(
+        f"{BASE_URL}/pipeline/runs/{rid}/stage/training_remote",
+        headers=hdr,
+        json={"host": "127.0.0.1", "port": 1, "username": "nobody", "password": "irrelevant",
+              "remote_workdir": "/srv/work", "remote_base_model_path": "/models/base.pt"},
+    )
+    assert r2.status_code == 409, r2.text
+
+
+def test_training_remote_stage_invalid_body_rejected(hdr, fresh_project):
+    run = _create_run(hdr, fresh_project)
+    r = requests.post(
+        f"{BASE_URL}/pipeline/runs/{run['id']}/stage/training_remote",
+        headers=hdr,
+        json={"host": "127.0.0.1", "username": "nobody"},  # missing remote_workdir, remote_base_model_path
+    )
+    assert r.status_code == 400
 
 
 def test_uploading_data_stage_bad_percentages_rejected(hdr, fresh_project):
