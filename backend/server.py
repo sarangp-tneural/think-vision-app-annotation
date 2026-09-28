@@ -1621,6 +1621,7 @@ from routers import teams as _teams_router
 from routers import collaboration as _collab_router
 from routers import projects as _projects_router
 from routers import images as _images_router
+from routers import deployment as _deployment_router
 _training_router.register(_this_module)
 _al_router.register(_this_module)
 _auth_router.register(_this_module)
@@ -1628,6 +1629,7 @@ _teams_router.register(_this_module)
 _collab_router.register(_this_module)
 _projects_router.register(_this_module)
 _images_router.register(_this_module)
+_deployment_router.register(_this_module)
 api_router.include_router(_training_router.router)
 api_router.include_router(_al_router.router)
 api_router.include_router(_auth_router.router)
@@ -1635,6 +1637,7 @@ api_router.include_router(_teams_router.router)
 api_router.include_router(_collab_router.router)
 api_router.include_router(_projects_router.router)
 api_router.include_router(_images_router.router)
+api_router.include_router(_deployment_router.router)
 
 app.include_router(api_router)
 
