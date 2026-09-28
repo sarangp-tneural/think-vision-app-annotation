@@ -3,12 +3,16 @@
 
 M0 stood up enough of a `pipeline_runs`/`deployment_pipelines` skeleton to
 make the cross-run concurrency guard real and testable, with every stage
-running through a generic stub. M3 wires in the first real stage,
-`class_check`; the other five (`uploading_data`, `training_remote`,
-`downloading_model`, `testing`, `deploying`) still run through the stub until
-M4-M8 replace them one at a time. approve/reject/rollback/run-history
-endpoints are deliberately not built here (M8/M9's job) since their semantics
-aren't designed yet.
+running through a generic stub. M3 wired in the first real (synchronous)
+stage, `class_check`. M4 wires in `uploading_data`, the first stage that does
+genuinely long-running work (build the split dataset dir, SCP it to the
+remote host) and so is the first to use a real background-thread worker
+(`deployment_worker.py`, mirroring `_train_yolo_sync`'s pattern) instead of
+either the synchronous-inline shortcut `class_check` uses or the generic
+stub. The remaining three stages (`training_remote`, `downloading_model`,
+`testing`, `deploying`) still run through the stub until M5-M8 replace them
+one at a time. approve/reject/rollback/run-history endpoints are deliberately
+not built here (M8/M9's job) since their semantics aren't designed yet.
 """
 import asyncio
 import shlex
@@ -18,9 +22,10 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException
 from pydantic import ValidationError
 
+import deployment_worker
 import pipeline_logic
 import ssh_helper
-from schemas.deployment import ClassCheckRequest
+from schemas.deployment import ClassCheckRequest, UploadingDataRequest
 
 router = APIRouter()
 
@@ -208,6 +213,25 @@ def register(s):
                         }
                     },
                 )
+            return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
+
+        if stage == "uploading_data":
+            try:
+                req = UploadingDataRequest(**body)
+            except ValidationError as e:
+                await db.pipeline_runs.update_one({"id": rid}, {"$set": {"busy": False}})
+                raise HTTPException(status_code=400, detail=f"Invalid uploading_data request: {e}")
+
+            if abs(req.train_pct + req.valid_pct + req.test_pct - 1.0) > 1e-6:
+                await db.pipeline_runs.update_one({"id": rid}, {"$set": {"busy": False}})
+                raise HTTPException(status_code=400, detail="train_pct + valid_pct + test_pct must sum to 1.0")
+
+            async def _job():
+                await asyncio.to_thread(
+                    deployment_worker._pipeline_uploading_data_sync,
+                    rid, run["project_id"], history_index, req.model_dump(), s.get_object,
+                )
+            background.add_task(_job)
             return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
 
         async def _stub_stage_job():

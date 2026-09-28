@@ -1,13 +1,16 @@
 """Deploy Pipeline tests: pipeline run creation and the stage concurrency
-guard (M0), the split-export format (M2), and the class_check stage (M3).
+guard (M0), the split-export format (M2), the class_check stage (M3), and the
+uploading_data stage's backgrounding/concurrency-guard/failure path (M4).
 
 Live-HTTP integration tests, following the same idiom as
 test_iteration9_new_endpoints.py / test_iteration11_routers_nudge_obb.py: real
 requests against a running backend, real MongoDB for seeding/teardown, no
-mocking. (ssh_helper.py's and pipeline_logic.py's mocked/pure unit tests live
-separately in test_ssh_helper.py / test_pipeline_logic.py, since neither
-module has a live counterpart to hit. The class_check test below points at a
-real closed port instead of mocking SSH - see its docstring.)
+mocking. (ssh_helper.py's, pipeline_logic.py's, and deployment_worker.py's
+mocked/pure unit tests live separately in test_ssh_helper.py /
+test_pipeline_logic.py / test_deployment_worker.py, since none of those
+modules has a live route of their own to hit. The class_check and
+uploading_data failure-path tests below point at a real closed port instead
+of mocking SSH - see their docstrings.)
 """
 import os
 import time
@@ -97,10 +100,13 @@ def test_create_pipeline_run(hdr, fresh_project):
 
 
 def test_stage_call_marks_busy_then_clears(hdr, fresh_project):
+    """Uses downloading_model, not uploading_data - the latter graduated to a
+    real (M4) stage with its own request-body validation, so a still-generic
+    stub stage is needed here to exercise M0's original stub mechanism."""
     run = _create_run(hdr, fresh_project)
     rid = run["id"]
 
-    r = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/uploading_data", headers=hdr)
+    r = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/downloading_model", headers=hdr)
     assert r.status_code == 200, r.text
     assert r.json()["busy"] is True
 
@@ -118,11 +124,13 @@ def test_stage_call_marks_busy_then_clears(hdr, fresh_project):
 
 
 def test_concurrent_stage_call_rejected(hdr, fresh_project):
-    """The M0 DoD test: two rapid stage calls on the same pipeline_id, second gets 409."""
+    """The M0 DoD test: two rapid stage calls on the same pipeline_id, second
+    gets 409. Uses downloading_model (still a generic stub) for the same
+    reason as test_stage_call_marks_busy_then_clears above."""
     run = _create_run(hdr, fresh_project)
     rid = run["id"]
 
-    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/uploading_data", headers=hdr)
+    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/downloading_model", headers=hdr)
     assert r1.status_code == 200, r1.text
 
     r2 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/class_check", headers=hdr)
@@ -271,5 +279,79 @@ def test_class_check_stage_invalid_body_rejected(hdr, fresh_project):
         f"{BASE_URL}/pipeline/runs/{run['id']}/stage/class_check",
         headers=hdr,
         json={"host": "127.0.0.1", "username": "nobody"},  # missing remote_data_yaml_path
+    )
+    assert r.status_code == 400
+
+
+# --- M4: uploading_data stage -------------------------------------------------
+
+def test_uploading_data_stage_returns_immediately_then_fails(hdr, fresh_project):
+    """Points at a real closed port, same idiom as the class_check failure
+    test - there's still no way to mock SSH inside an already-running,
+    separate server process. Unlike class_check (synchronous), this stage's
+    work is genuinely backgrounded, so the POST itself must return quickly
+    with busy still True (proving the SSH/upload work isn't blocking the
+    request), and the run eventually resolves to failed with an error."""
+    run = _create_run(hdr, fresh_project)
+    rid = run["id"]
+
+    start = time.monotonic()
+    r1 = requests.post(
+        f"{BASE_URL}/pipeline/runs/{rid}/stage/uploading_data",
+        headers=hdr,
+        json={
+            "host": "127.0.0.1",
+            "port": 1,
+            "username": "nobody",
+            "password": "irrelevant",
+            "remote_workdir": "/srv/work",
+        },
+    )
+    elapsed = time.monotonic() - start
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["busy"] is True
+    assert elapsed < 5, f"stage/uploading_data should return immediately, took {elapsed:.2f}s"
+
+    time.sleep(3)
+    r = requests.get(f"{BASE_URL}/pipeline/runs/{rid}", headers=hdr)
+    body = r.json()
+    assert body["busy"] is False
+    assert body["status"] == "failed"
+    assert body["error"]
+
+
+def test_uploading_data_stage_respects_concurrency_guard(hdr, fresh_project):
+    """A real closed-port connection refusal on loopback can resolve in
+    under a millisecond - racing it against a second HTTP round-trip from
+    this test process is not reliably observable (confirmed: flaked under
+    load). Instead, use the same reliable mechanism M0's own concurrency
+    test already established: the generic stub's fixed delay gives a wide,
+    deterministic busy window. Calling uploading_data as the SECOND stage
+    (rather than the first, like M0's test) confirms uploading_data's new
+    branch is dispatched after the shared guard check, not before it."""
+    run = _create_run(hdr, fresh_project)
+    rid = run["id"]
+
+    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/downloading_model", headers=hdr)
+    assert r1.status_code == 200, r1.text
+
+    r2 = requests.post(
+        f"{BASE_URL}/pipeline/runs/{rid}/stage/uploading_data",
+        headers=hdr,
+        json={"host": "127.0.0.1", "port": 1, "username": "nobody",
+              "password": "irrelevant", "remote_workdir": "/srv/work"},
+    )
+    assert r2.status_code == 409, r2.text
+
+
+def test_uploading_data_stage_bad_percentages_rejected(hdr, fresh_project):
+    run = _create_run(hdr, fresh_project)
+    r = requests.post(
+        f"{BASE_URL}/pipeline/runs/{run['id']}/stage/uploading_data",
+        headers=hdr,
+        json={
+            "host": "127.0.0.1", "port": 1, "username": "nobody", "password": "x",
+            "remote_workdir": "/srv/work", "train_pct": 0.5, "valid_pct": 0.5, "test_pct": 0.5,
+        },
     )
     assert r.status_code == 400

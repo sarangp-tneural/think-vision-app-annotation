@@ -29,3 +29,14 @@ class ClassCheckRequest(SSHCredentials):
     request, never read from deployment_pipelines, never persisted."""
 
     remote_data_yaml_path: str
+
+
+class UploadingDataRequest(SSHCredentials):
+    """Body for POST /pipeline/runs/{rid}/stage/uploading_data. Same
+    rationale as ClassCheckRequest: remote_workdir (and the split
+    percentages) come fresh per request, not from deployment_pipelines."""
+
+    remote_workdir: str
+    train_pct: float = 0.7
+    valid_pct: float = 0.2
+    test_pct: float = 0.1
