@@ -546,3 +546,29 @@ def test_rollback_without_deployment_pipeline_fails(hdr, fresh_project):
               "remote_production_model_path": "/srv/models/prod.pt"},
     )
     assert r.status_code == 400, r.text
+
+
+# --- M9: run history list (backend gap found while planning the frontend) ---
+
+def test_list_pipeline_runs_empty_for_fresh_project(hdr, fresh_project):
+    r = requests.get(f"{BASE_URL}/projects/{fresh_project}/pipeline/runs", headers=hdr)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["runs"] == []
+    assert body["last_deployed_run_id"] is None
+
+
+def test_list_pipeline_runs_returns_newest_first_with_last_deployed(hdr, fresh_project, db):
+    run1 = _create_run(hdr, fresh_project)
+    run2 = _create_run(hdr, fresh_project)
+
+    pipeline = db.deployment_pipelines.find_one({"project_id": fresh_project})
+    db.deployment_pipelines.update_one({"id": pipeline["id"]}, {"$set": {"last_deployed_run_id": run1["id"]}})
+
+    r = requests.get(f"{BASE_URL}/projects/{fresh_project}/pipeline/runs", headers=hdr)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    ids_in_order = [run["id"] for run in body["runs"]]
+    assert ids_in_order == [run2["id"], run1["id"]]  # newest first
+    assert body["last_deployed_run_id"] == run1["id"]
+    assert body["pipeline_id"] == pipeline["id"]

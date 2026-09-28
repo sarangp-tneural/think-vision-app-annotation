@@ -139,6 +139,22 @@ def register(s):
         await s._project_access_check(run["project_id"], current["id"])
         return run
 
+    @router.get("/projects/{pid}/pipeline/runs")
+    async def list_pipeline_runs(pid: str, current=Depends(get_current_user)):
+        """In ROADMAP.md's own §4 endpoint table but never implemented across
+        M0-M8 - added here for M9's run-history list. Bundles
+        last_deployed_run_id (off deployment_pipelines) into the same
+        response rather than adding a second new endpoint just to gate the
+        frontend's Rollback button, since §4 doesn't list one either."""
+        await s._project_access_check(pid, current["id"])
+        runs = await db.pipeline_runs.find({"project_id": pid}, {"_id": 0}).sort("created_at", -1).to_list(200)
+        pipeline = await db.deployment_pipelines.find_one({"project_id": pid}, {"_id": 0})
+        return {
+            "runs": runs,
+            "last_deployed_run_id": (pipeline or {}).get("last_deployed_run_id"),
+            "pipeline_id": (pipeline or {}).get("id"),
+        }
+
     @router.post("/pipeline/runs/{rid}/stage/{stage}")
     async def run_stage(
         rid: str,

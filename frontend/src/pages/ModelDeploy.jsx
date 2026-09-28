@@ -14,6 +14,8 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import DeployPipeline from "@/pages/DeployPipeline";
+import { Server } from "lucide-react";
 
 export default function ModelDeploy() {
   const { pid } = useParams();
@@ -164,6 +166,9 @@ export default function ModelDeploy() {
             </TabsTrigger>
             <TabsTrigger value="simulated" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-simulated">
               Simulated
+            </TabsTrigger>
+            <TabsTrigger value="pipeline" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-pipeline">
+              <Server className="w-3 h-3 mr-2" /> Deploy Pipeline
             </TabsTrigger>
           </TabsList>
 
@@ -532,6 +537,11 @@ export default function ModelDeploy() {
             <p className="text-sm text-muted-foreground">Configure a run above to train your first model.</p>
           </div>
         )}
+          </TabsContent>
+
+          {/* DEPLOY PIPELINE TAB (M9) */}
+          <TabsContent value="pipeline">
+            <DeployPipeline pid={pid} project={project} />
           </TabsContent>
         </Tabs>
       </main>
