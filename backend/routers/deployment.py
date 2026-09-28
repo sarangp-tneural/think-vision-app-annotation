@@ -1,17 +1,26 @@
 """Deploy Pipeline endpoints (extracted to its own router per the existing
 `register(server_module)` convention — see routers/training.py).
 
-M0 scope only: enough of a `pipeline_runs`/`deployment_pipelines` skeleton to
-make the cross-run concurrency guard real and testable. Stage handlers are
-stubs (no SSH, no real training) until M2-M8 replace them one stage at a time;
-approve/reject/rollback/run-history endpoints are deliberately not built here
-(M8/M9's job) since their semantics aren't designed yet.
+M0 stood up enough of a `pipeline_runs`/`deployment_pipelines` skeleton to
+make the cross-run concurrency guard real and testable, with every stage
+running through a generic stub. M3 wires in the first real stage,
+`class_check`; the other five (`uploading_data`, `training_remote`,
+`downloading_model`, `testing`, `deploying`) still run through the stub until
+M4-M8 replace them one at a time. approve/reject/rollback/run-history
+endpoints are deliberately not built here (M8/M9's job) since their semantics
+aren't designed yet.
 """
 import asyncio
+import shlex
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException
+from pydantic import ValidationError
+
+import pipeline_logic
+import ssh_helper
+from schemas.deployment import ClassCheckRequest
 
 router = APIRouter()
 
@@ -24,11 +33,26 @@ VALID_STAGES = {
     "deploying",
 }
 
-# M0 placeholder only: no real stage logic exists yet, so a stage call has
-# nothing blocking to do. This delay just gives the busy window enough width
-# to be deterministically observable (see test_concurrent_stage_call_rejected).
-# Replaced stage-by-stage by real BackgroundTasks/thread workers in M2-M8.
+# M0 placeholder only, still used by every stage except class_check: no real
+# stage logic exists for them yet, so a stage call has nothing blocking to do.
+# This delay just gives the busy window enough width to be deterministically
+# observable (see test_concurrent_stage_call_rejected). Replaced stage-by-stage
+# by real BackgroundTasks/thread workers in M4-M8.
 STUB_STAGE_DELAY_SECONDS = 1.5
+
+
+def _fetch_remote_yaml_sync(req: ClassCheckRequest) -> str:
+    """Blocking (paramiko) - always run via asyncio.to_thread, never called
+    directly from an async def, matching this codebase's existing convention
+    for blocking I/O (_train_yolo_sync, the resend email send)."""
+    with ssh_helper.connect(req.host, req.port, req.username, req.pem_key, req.password) as client:
+        cmd = f"cat {shlex.quote(req.remote_data_yaml_path)}"
+        exit_code, out, err = ssh_helper.exec_command(client, cmd)
+        if exit_code != 0:
+            raise ssh_helper.SSHConnectionError(
+                f"cat {req.remote_data_yaml_path} failed (exit {exit_code}): {err.strip()}"
+            )
+        return out
 
 
 def register(s):
@@ -106,7 +130,11 @@ def register(s):
 
     @router.post("/pipeline/runs/{rid}/stage/{stage}")
     async def run_stage(
-        rid: str, stage: str, background: BackgroundTasks, current=Depends(get_current_user)
+        rid: str,
+        stage: str,
+        background: BackgroundTasks,
+        current=Depends(get_current_user),
+        body: dict = Body(default_factory=dict),
     ):
         run = await db.pipeline_runs.find_one({"id": rid})
         if not run:
@@ -138,6 +166,49 @@ def register(s):
                 "$push": {"stage_history": entry},
             },
         )
+
+        if stage == "class_check":
+            try:
+                req = ClassCheckRequest(**body)
+            except ValidationError as e:
+                await db.pipeline_runs.update_one({"id": rid}, {"$set": {"busy": False}})
+                raise HTTPException(status_code=400, detail=f"Invalid class_check request: {e}")
+
+            finished = datetime.now(timezone.utc).isoformat()
+            try:
+                remote_yaml_text = await asyncio.to_thread(_fetch_remote_yaml_sync, req)
+                project = await db.projects.find_one({"id": run["project_id"]}, {"classes": 1})
+                result = pipeline_logic.diff_classes(project.get("classes", []), remote_yaml_text)
+                # status stays "class_check" on match (M0's "status = last
+                # stage name, busy = is it running" convention - the next
+                # stage call is what advances status); "failed" + run.error
+                # on mismatch, per ROADMAP's explicit instruction.
+                update = {
+                    "busy": False,
+                    "updated_at": finished,
+                    "status": "class_check" if result["match"] else "failed",
+                    "class_check": {**result, "checked_at": finished},
+                    f"stage_history.{history_index}.status": "succeeded" if result["match"] else "failed",
+                    f"stage_history.{history_index}.finished_at": finished,
+                }
+                if not result["match"]:
+                    update["error"] = "Class mismatch between local project and remote data.yaml"
+                await db.pipeline_runs.update_one({"id": rid}, {"$set": update})
+            except ssh_helper.SSHConnectionError as e:
+                await db.pipeline_runs.update_one(
+                    {"id": rid},
+                    {
+                        "$set": {
+                            "busy": False,
+                            "updated_at": finished,
+                            "status": "failed",
+                            "error": str(e)[:500],
+                            f"stage_history.{history_index}.status": "failed",
+                            f"stage_history.{history_index}.finished_at": finished,
+                        }
+                    },
+                )
+            return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
 
         async def _stub_stage_job():
             await asyncio.sleep(STUB_STAGE_DELAY_SECONDS)

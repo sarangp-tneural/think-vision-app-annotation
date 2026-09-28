@@ -166,6 +166,7 @@ export default function Versions() {
                   <SelectItem value="yolo_obb">YOLO OBB (Rotated)</SelectItem>
                   <SelectItem value="coco">COCO JSON</SelectItem>
                   <SelectItem value="voc">Pascal VOC (XML)</SelectItem>
+                  <SelectItem value="split">YOLO (train/valid/test split)</SelectItem>
                 </SelectContent>
               </Select>
             </div>

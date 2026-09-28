@@ -1,19 +1,25 @@
-"""Deploy Pipeline (M0) tests: pipeline run creation and the stage
-concurrency guard.
+"""Deploy Pipeline tests: pipeline run creation and the stage concurrency
+guard (M0), the split-export format (M2), and the class_check stage (M3).
 
 Live-HTTP integration tests, following the same idiom as
 test_iteration9_new_endpoints.py / test_iteration11_routers_nudge_obb.py: real
 requests against a running backend, real MongoDB for seeding/teardown, no
-mocking. (ssh_helper.py's mocked-paramiko unit tests live separately in
-test_ssh_helper.py, since that module has no live counterpart to hit.)
+mocking. (ssh_helper.py's and pipeline_logic.py's mocked/pure unit tests live
+separately in test_ssh_helper.py / test_pipeline_logic.py, since neither
+module has a live counterpart to hit. The class_check test below points at a
+real closed port instead of mocking SSH - see its docstring.)
 """
 import os
 import time
 import uuid
+import zipfile
+from io import BytesIO
 
 import pytest
 import requests
+import yaml
 from dotenv import load_dotenv
+from PIL import Image
 from pymongo import MongoClient
 
 load_dotenv("/app/frontend/.env")
@@ -138,4 +144,132 @@ def test_bootstrap_run_cannot_deploy(hdr, fresh_project):
     run = _create_run(hdr, fresh_project)
     assert run["run_type"] == "bootstrap"
     r = requests.post(f"{BASE_URL}/pipeline/runs/{run['id']}/stage/deploying", headers=hdr)
+    assert r.status_code == 400
+
+
+# --- M2: split-export format -------------------------------------------------
+
+@pytest.fixture
+def seeded_split_project(hdr, db):
+    """A project seeded with real, fetchable annotated images - not the
+    storage_path: "nonexistent/..." shortcut other test files use, since
+    _build_split_dataset_dir skips the WHOLE image+label pair on a fetch
+    failure (unlike export_dataset's other formats), so fake paths would
+    silently empty every split and defeat the pairing assertions below."""
+    r = requests.post(
+        f"{BASE_URL}/projects",
+        headers=hdr,
+        json={
+            "name": f"TEST_split_export_{uuid.uuid4().hex[:8]}",
+            "description": "split export M2 test",
+            "task_type": "object_detection",
+        },
+    )
+    assert r.status_code in (200, 201), r.text
+    pid = r.json()["id"]
+
+    r = requests.post(f"{BASE_URL}/projects/{pid}/classes", headers=hdr, json={"label": "widget"})
+    assert r.status_code == 200, r.text
+
+    image_ids = []
+    for _ in range(20):
+        buf = BytesIO()
+        Image.new("RGB", (8, 8), color=(120, 50, 200)).save(buf, format="JPEG")
+        buf.seek(0)
+        r = requests.post(
+            f"{BASE_URL}/projects/{pid}/images",
+            headers=hdr,
+            files={"file": ("seed.jpg", buf, "image/jpeg")},
+        )
+        assert r.status_code == 200, r.text
+        img_id = r.json()["id"]
+
+        r = requests.put(
+            f"{BASE_URL}/images/{img_id}/annotations",
+            headers=hdr,
+            json={"boxes": [{"type": "bbox", "label": "widget", "x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}]},
+        )
+        assert r.status_code == 200, r.text
+        image_ids.append(img_id)
+
+    yield pid, image_ids
+
+    db.projects.delete_one({"id": pid})
+    db.images.delete_many({"project_id": pid})
+
+
+def _stem_set(names, prefix):
+    return {n[len(prefix):].rsplit(".", 1)[0] for n in names if n.startswith(prefix)}
+
+
+def test_split_export_structure(hdr, seeded_split_project):
+    pid, image_ids = seeded_split_project
+    r = requests.get(f"{BASE_URL}/projects/{pid}/export?format=split", headers=hdr)
+    assert r.status_code == 200, r.text
+    assert r.headers.get("content-type", "").startswith("application/zip")
+
+    zf = zipfile.ZipFile(BytesIO(r.content))
+    names = zf.namelist()
+
+    total_images = 0
+    for split in ("train", "valid", "test"):
+        img_stems = _stem_set(names, f"dataset/{split}/images/")
+        lbl_stems = _stem_set(names, f"dataset/{split}/labels/")
+        assert img_stems, f"{split}: no images written"
+        assert img_stems == lbl_stems, f"{split}: image/label mismatch: {img_stems ^ lbl_stems}"
+        total_images += len(img_stems)
+
+    assert total_images == len(image_ids)
+
+    data_yaml = yaml.safe_load(zf.read("dataset/data.yaml").decode())
+    assert data_yaml["train"] == "train/images"
+    assert data_yaml["val"] == "valid/images"
+    assert data_yaml["test"] == "test/images"
+    assert data_yaml["nc"] == 1
+    assert data_yaml["names"] == ["widget"]
+
+
+def test_split_export_bad_percentages(hdr, seeded_split_project):
+    pid, _ = seeded_split_project
+    r = requests.get(
+        f"{BASE_URL}/projects/{pid}/export?format=split&train_pct=0.5&valid_pct=0.5&test_pct=0.5",
+        headers=hdr,
+    )
+    assert r.status_code == 400
+
+
+# --- M3: class_check stage ---------------------------------------------------
+
+def test_class_check_stage_connection_failure_marks_run_failed(hdr, fresh_project):
+    """Points at a real closed port instead of mocking ssh_helper - there's no
+    existing precedent for mocking inside a live-HTTP test (the server is an
+    already-running separate process), and a real refused connection exercises
+    the exact same SSHConnectionError path with zero mocking, deterministically
+    fast (an OS-level refusal, not a timeout)."""
+    run = _create_run(hdr, fresh_project)
+    r = requests.post(
+        f"{BASE_URL}/pipeline/runs/{run['id']}/stage/class_check",
+        headers=hdr,
+        json={
+            "host": "127.0.0.1",
+            "port": 1,
+            "username": "nobody",
+            "password": "irrelevant",
+            "remote_data_yaml_path": "/data/data.yaml",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "failed"
+    assert body["busy"] is False
+    assert body["error"]
+
+
+def test_class_check_stage_invalid_body_rejected(hdr, fresh_project):
+    run = _create_run(hdr, fresh_project)
+    r = requests.post(
+        f"{BASE_URL}/pipeline/runs/{run['id']}/stage/class_check",
+        headers=hdr,
+        json={"host": "127.0.0.1", "username": "nobody"},  # missing remote_data_yaml_path
+    )
     assert r.status_code == 400

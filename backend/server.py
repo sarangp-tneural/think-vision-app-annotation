@@ -26,6 +26,8 @@ from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from dotenv import load_dotenv
 from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
 
+from pipeline_logic import SPLITS
+
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
@@ -986,7 +988,14 @@ async def list_versions(pid: str, current=Depends(get_current_user)):
 
 
 @api_router.get("/projects/{pid}/export")
-async def export_dataset(pid: str, format: str = "yolo", current=Depends(get_current_user)):
+async def export_dataset(
+    pid: str,
+    format: str = "yolo",
+    train_pct: float = 0.7,
+    valid_pct: float = 0.2,
+    test_pct: float = 0.1,
+    current=Depends(get_current_user),
+):
     project = await _verify_project(pid, current["id"])
     images = await db.images.find({"project_id": pid, "annotated": True}, {"_id": 0}).to_list(2000)
     classes = project.get("classes", [])
@@ -1141,6 +1150,19 @@ async def export_dataset(pid: str, format: str = "yolo", current=Depends(get_cur
                     xml += "  </object>\n"
                 xml += "</annotation>\n"
                 zf.writestr(f"dataset/annotations/{img['id']}.xml", xml)
+        elif format == "split":
+            if abs(train_pct + valid_pct + test_pct - 1.0) > 1e-6:
+                raise HTTPException(status_code=400, detail="train_pct + valid_pct + test_pct must sum to 1.0")
+            local_tmp_dir, _test_image_ids = await _build_split_dataset_dir(pid, project, train_pct, valid_pct, test_pct)
+            try:
+                for root, _dirs, files in os.walk(local_tmp_dir):
+                    for fname in files:
+                        abs_path = os.path.join(root, fname)
+                        rel_path = os.path.relpath(abs_path, local_tmp_dir)
+                        zf.write(abs_path, f"dataset/{rel_path.replace(os.sep, '/')}")
+            finally:
+                import shutil
+                shutil.rmtree(local_tmp_dir, ignore_errors=True)
         else:
             raise HTTPException(status_code=400, detail="Unsupported format")
 
@@ -1150,6 +1172,106 @@ async def export_dataset(pid: str, format: str = "yolo", current=Depends(get_cur
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename={project['name']}_{format}.zip"},
     )
+
+
+def _yolo_label_line(a: dict, cls_to_idx: dict) -> Optional[str]:
+    """Annotation -> one YOLO detection line ("cls cx cy w h"), or None to
+    skip. Deliberately mirrors _train_yolo_sync's conversion (skip unknown
+    labels, skip degenerate zero/negative-size boxes) rather than
+    export_dataset's own _bbox_of/_ann_type closures (which lack both
+    guards) - this feeds a plain-detection remote training run, so it always
+    reduces to an axis-aligned box (no OBB, no YOLO-seg polygon lines), same
+    as _train_yolo_sync's own output. Neither existing implementation is
+    touched; this is a new, independent helper."""
+    label = a.get("label")
+    if label not in cls_to_idx:
+        return None
+    idx = cls_to_idx[label]
+    t = a.get("type", "bbox")
+    if t == "polygon" and a.get("points"):
+        pts = a["points"]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        x, y = min(xs), min(ys)
+        w, h = max(xs) - x, max(ys) - y
+    elif t == "ellipse":
+        cx0, cy0 = a.get("x", 0), a.get("y", 0)
+        rx, ry = a.get("rx", 0), a.get("ry", 0)
+        x, y, w, h = cx0 - rx, cy0 - ry, 2 * rx, 2 * ry
+    else:  # bbox / polyline fallback (rotation, if any, is ignored)
+        x, y, w, h = a.get("x", 0), a.get("y", 0), a.get("w", 0), a.get("h", 0)
+    if w <= 0 or h <= 0:
+        return None
+    cx, cy = x + w / 2, y + h / 2
+    return f"{idx} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}"
+
+
+async def _build_split_dataset_dir(pid: str, project: dict, train_pct: float = 0.7,
+                                    valid_pct: float = 0.2, test_pct: float = 0.1):
+    """Writes a real train/valid/test split directory to a temp dir (unlike
+    export_dataset's in-memory ZIP) and returns (local_tmp_dir,
+    test_image_ids). Layout is {tmp_root}/{split}/{images,labels}/ - split
+    first, not type-first like _train_yolo_sync's images/{split}/ - because
+    pipeline_logic.validate_dataset_dir (ported from cicd-pipeline-main)
+    hardcodes exactly this shape. Used both by export_dataset's "split"
+    format (manual download) and, from M4 onward, the pipeline's own
+    uploading_data stage (SCP'd directly, no ZIP involved)."""
+    images = await db.images.find({"project_id": pid, "annotated": True}, {"_id": 0}).to_list(2000)
+    classes = project.get("classes", [])
+    cls_to_idx = {c: i for i, c in enumerate(classes)}
+
+    tmp_root = tempfile.mkdtemp(prefix=f"split_export_{pid}_")
+    split_dirs = {}
+    for split in SPLITS:
+        img_dir = os.path.join(tmp_root, split, "images")
+        lbl_dir = os.path.join(tmp_root, split, "labels")
+        os.makedirs(img_dir, exist_ok=True)
+        os.makedirs(lbl_dir, exist_ok=True)
+        split_dirs[split] = (img_dir, lbl_dir)
+
+    random.shuffle(images)
+    n_train = int(len(images) * train_pct)
+    n_valid = int(len(images) * valid_pct)
+    # The remainder (not int(len * test_pct)) becomes test, so no image is
+    # lost to rounding.
+    assignments = (
+        [(img, "train") for img in images[:n_train]]
+        + [(img, "valid") for img in images[n_train:n_train + n_valid]]
+        + [(img, "test") for img in images[n_train + n_valid:]]
+    )
+
+    test_image_ids = []
+    for img, split in assignments:
+        img_dir, lbl_dir = split_dirs[split]
+        try:
+            data, _ct = get_object(img["storage_path"])
+            if not data:
+                raise Exception("empty image data")
+            lines = [
+                line for a in img.get("annotations", [])
+                if (line := _yolo_label_line(a, cls_to_idx)) is not None
+            ]
+            ext = (img["filename"].rsplit(".", 1)[-1] if "." in img["filename"] else "jpg").lower()
+            with open(os.path.join(img_dir, f"{img['id']}.{ext}"), "wb") as f:
+                f.write(data)
+            with open(os.path.join(lbl_dir, f"{img['id']}.txt"), "w") as f:
+                f.write("\n".join(lines))
+            if split == "test":
+                test_image_ids.append(img["id"])
+        except Exception as ie:
+            # Skip the WHOLE pair on failure (unlike export_dataset's other
+            # formats, which still write an orphan label) - a label with no
+            # image is worse than useless for training.
+            logger.warning(f"Skip image {img['id']} from split export: {ie}")
+
+    yaml_path = os.path.join(tmp_root, "data.yaml")
+    with open(yaml_path, "w") as f:
+        f.write(
+            f"path: {tmp_root}\ntrain: train/images\nval: valid/images\ntest: test/images\n"
+            f"nc: {len(classes)}\nnames: {classes}\n"
+        )
+
+    return tmp_root, test_image_ids
 
 
 # ----------------- Training (Simulated) ----------------- #
