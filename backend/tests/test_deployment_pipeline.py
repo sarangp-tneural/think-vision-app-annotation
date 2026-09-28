@@ -1,7 +1,8 @@
 """Deploy Pipeline tests: pipeline run creation and the stage concurrency
 guard (M0), the split-export format (M2), the class_check stage (M3), the
-uploading_data stage's backgrounding/concurrency-guard/failure path (M4), and
-the training_remote stage's failure/concurrency-guard path (M5).
+uploading_data stage's backgrounding/concurrency-guard/failure path (M4),
+the training_remote stage's failure/concurrency-guard path (M5), and the
+downloading_model stage's failure/validation path (M6).
 
 Live-HTTP integration tests, following the same idiom as
 test_iteration9_new_endpoints.py / test_iteration11_routers_nudge_obb.py: real
@@ -101,13 +102,14 @@ def test_create_pipeline_run(hdr, fresh_project):
 
 
 def test_stage_call_marks_busy_then_clears(hdr, fresh_project):
-    """Uses downloading_model, not uploading_data - the latter graduated to a
-    real (M4) stage with its own request-body validation, so a still-generic
-    stub stage is needed here to exercise M0's original stub mechanism."""
+    """Uses testing, the one stage still left as a generic stub as of M6 -
+    uploading_data/training_remote/downloading_model all graduated to real
+    stages with their own request-body validation, so a still-generic stub
+    stage is needed here to exercise M0's original stub mechanism."""
     run = _create_run(hdr, fresh_project)
     rid = run["id"]
 
-    r = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/downloading_model", headers=hdr)
+    r = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/testing", headers=hdr)
     assert r.status_code == 200, r.text
     assert r.json()["busy"] is True
 
@@ -126,12 +128,12 @@ def test_stage_call_marks_busy_then_clears(hdr, fresh_project):
 
 def test_concurrent_stage_call_rejected(hdr, fresh_project):
     """The M0 DoD test: two rapid stage calls on the same pipeline_id, second
-    gets 409. Uses downloading_model (still a generic stub) for the same
-    reason as test_stage_call_marks_busy_then_clears above."""
+    gets 409. Uses testing (still a generic stub) for the same reason as
+    test_stage_call_marks_busy_then_clears above."""
     run = _create_run(hdr, fresh_project)
     rid = run["id"]
 
-    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/downloading_model", headers=hdr)
+    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/testing", headers=hdr)
     assert r1.status_code == 200, r1.text
 
     r2 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/class_check", headers=hdr)
@@ -333,7 +335,7 @@ def test_uploading_data_stage_respects_concurrency_guard(hdr, fresh_project):
     run = _create_run(hdr, fresh_project)
     rid = run["id"]
 
-    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/downloading_model", headers=hdr)
+    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/testing", headers=hdr)
     assert r1.status_code == 200, r1.text
 
     r2 = requests.post(
@@ -389,7 +391,7 @@ def test_training_remote_stage_respects_concurrency_guard(hdr, fresh_project):
     run = _create_run(hdr, fresh_project)
     rid = run["id"]
 
-    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/downloading_model", headers=hdr)
+    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/testing", headers=hdr)
     assert r1.status_code == 200, r1.text
 
     r2 = requests.post(
@@ -420,5 +422,45 @@ def test_uploading_data_stage_bad_percentages_rejected(hdr, fresh_project):
             "host": "127.0.0.1", "port": 1, "username": "nobody", "password": "x",
             "remote_workdir": "/srv/work", "train_pct": 0.5, "valid_pct": 0.5, "test_pct": 0.5,
         },
+    )
+    assert r.status_code == 400
+
+
+# --- M6: downloading_model stage ---------------------------------------------
+
+def test_downloading_model_stage_without_training_data_fails(hdr, fresh_project):
+    """Same reasoning as training_remote's precondition-failure test: no real
+    SSH server exists in this environment, so the meaningful automatable
+    failure mode is calling downloading_model before training_remote has
+    ever populated the run's training field. The worker checks this and
+    fails fast, before attempting any SSH connection at all."""
+    run = _create_run(hdr, fresh_project)
+    rid = run["id"]
+
+    start = time.monotonic()
+    r1 = requests.post(
+        f"{BASE_URL}/pipeline/runs/{rid}/stage/downloading_model",
+        headers=hdr,
+        json={"host": "127.0.0.1", "port": 1, "username": "nobody", "password": "irrelevant"},
+    )
+    elapsed = time.monotonic() - start
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["busy"] is True
+    assert elapsed < 5, f"stage/downloading_model should return immediately, took {elapsed:.2f}s"
+
+    time.sleep(1)
+    r = requests.get(f"{BASE_URL}/pipeline/runs/{rid}", headers=hdr)
+    body = r.json()
+    assert body["busy"] is False
+    assert body["status"] == "failed"
+    assert "training_remote" in body["error"]
+
+
+def test_downloading_model_stage_invalid_body_rejected(hdr, fresh_project):
+    run = _create_run(hdr, fresh_project)
+    r = requests.post(
+        f"{BASE_URL}/pipeline/runs/{run['id']}/stage/downloading_model",
+        headers=hdr,
+        json={"host": "127.0.0.1"},  # missing username
     )
     assert r.status_code == 400

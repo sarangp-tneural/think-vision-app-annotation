@@ -55,3 +55,10 @@ class TrainingRemoteRequest(SSHCredentials):
     remote_base_model_path: str
     remote_production_model_path: Optional[str] = None
     epochs: int = 10
+
+
+class DownloadingModelRequest(SSHCredentials):
+    """Body for POST /pipeline/runs/{rid}/stage/downloading_model. No extra
+    fields beyond SSHCredentials - the remote run dir, run name, and
+    metrics.json path are all read back from what training_remote (M5)
+    already stored on the run doc, not re-supplied here."""

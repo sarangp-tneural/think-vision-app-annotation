@@ -8,6 +8,7 @@ passed in as plain call-time arguments by routers/deployment.py's register(s)
 closure, rather than imported here - see backend/pipeline_logic.py and
 backend/ssh_helper.py for the same "no FastAPI/server.py imports" discipline.
 """
+import json
 import logging
 import os
 import random
@@ -15,6 +16,7 @@ import re
 import shlex
 import shutil
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -327,4 +329,114 @@ def _pipeline_training_remote_sync(run_id: str, project_id: str, history_index: 
     finally:
         if local_script_path and os.path.exists(local_script_path):
             os.remove(local_script_path)
+        sync_client.close()
+
+
+def _pipeline_downloading_model_sync(run_id: str, project_id: str, history_index: int,
+                                      req: dict, put_object_fn, app_name: str) -> None:
+    """SFTP-downloads the trained weights (best.pt, falling back to last.pt)
+    and metrics.json that training_remote (M5) produced, uploads the weights
+    into object storage, and registers a pipeline_candidate models doc so the
+    existing, unmodified POST /models/{mid}/activate can activate it later
+    (M8) exactly like a locally-trained model. No extra request fields are
+    needed beyond SSH credentials - the remote run dir, run name, and
+    metrics.json path were all already stored on the run doc by M5."""
+    sync_client = MongoClient(MONGO_URL)
+    sync_db = sync_client[DB_NAME]
+    local_weights_path = None
+    local_metrics_path = None
+    try:
+        run = sync_db.pipeline_runs.find_one({"id": run_id})
+        if not run:
+            raise Exception("pipeline run not found")
+
+        training = run.get("training") or {}
+        remote_run_dir = training.get("remote_run_dir")
+        hyperparams_used = training.get("hyperparams_used") or {}
+        run_name = hyperparams_used.get("run_name")
+        metrics_json_path = hyperparams_used.get("metrics_json_path")
+        if not remote_run_dir or not run_name or not metrics_json_path:
+            raise Exception("no training data on run - run training_remote first")
+
+        remote_weights_dir = f"{remote_run_dir}/{run_name}/weights"
+        best_pt = f"{remote_weights_dir}/best.pt"
+        last_pt = f"{remote_weights_dir}/last.pt"
+
+        local_fd, local_weights_path = tempfile.mkstemp(prefix=f"candidate_{run_id}_", suffix=".pt")
+        os.close(local_fd)
+        local_metrics_fd, local_metrics_path = tempfile.mkstemp(prefix=f"metrics_{run_id}_", suffix=".json")
+        os.close(local_metrics_fd)
+
+        with ssh_helper.connect(req["host"], req["port"], req["username"],
+                                 req.get("pem_key"), req.get("password")) as client:
+            try:
+                ssh_helper.download_file(client, best_pt, local_weights_path)
+            except Exception:
+                # Mirrors _train_yolo_sync's local best.pt-not-found ->
+                # last.pt fallback (server.py:1489-1491), adapted for SFTP
+                # where there's no cheap remote os.path.exists check.
+                ssh_helper.download_file(client, last_pt, local_weights_path)
+            ssh_helper.download_file(client, metrics_json_path, local_metrics_path)
+
+        with open(local_weights_path, "rb") as f:
+            weights_bytes = f.read()
+        with open(local_metrics_path) as f:
+            raw_metrics = json.load(f)
+        # Rename to the mAP50/mAP50_95 casing ROADMAP.md's candidate_model
+        # field and the "real" model shape both use - the remote script (M5)
+        # intentionally kept eval.py's original lowercase map50/map50_95 keys.
+        metrics = {
+            "mAP50": float(raw_metrics.get("map50", 0)),
+            "mAP50_95": float(raw_metrics.get("map50_95", 0)),
+            "precision": float(raw_metrics.get("precision", 0)),
+            "recall": float(raw_metrics.get("recall", 0)),
+        }
+
+        storage_path = f"{app_name}/projects/{project_id}/pipeline_runs/{run_id}/candidate.pt"
+        put_object_fn(storage_path, weights_bytes, "application/octet-stream")
+
+        mid = str(uuid.uuid4())
+        finished = _now_iso()
+        sync_db.models.insert_one({
+            "id": mid, "project_id": project_id, "type": "pipeline_candidate",
+            "pipeline_run_id": run_id,
+            "status": "trained", "is_active": False,
+            "weights_path": storage_path, "weights_size": len(weights_bytes),
+            "final_mAP": metrics["mAP50"], "final_loss": 1 - metrics["mAP50_95"],
+            "precision": metrics["precision"], "recall": metrics["recall"],
+            "metrics_full": metrics,
+            "created_at": finished, "completed_at": finished,
+        })
+
+        sync_db.pipeline_runs.update_one(
+            {"id": run_id},
+            {"$set": {
+                "busy": False,
+                "updated_at": finished,
+                "candidate_model": {
+                    "local_model_id": mid,
+                    "weights_path": storage_path,
+                    "metrics": metrics,
+                },
+                f"stage_history.{history_index}.status": "succeeded",
+                f"stage_history.{history_index}.finished_at": finished,
+            }},
+        )
+    except Exception as e:
+        finished = _now_iso()
+        sync_db.pipeline_runs.update_one(
+            {"id": run_id},
+            {"$set": {
+                "busy": False,
+                "updated_at": finished,
+                "status": "failed",
+                "error": str(e)[:500],
+                f"stage_history.{history_index}.status": "failed",
+                f"stage_history.{history_index}.finished_at": finished,
+            }},
+        )
+    finally:
+        for p in (local_weights_path, local_metrics_path):
+            if p and os.path.exists(p):
+                os.remove(p)
         sync_client.close()
