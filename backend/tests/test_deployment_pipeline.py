@@ -2,7 +2,8 @@
 guard (M0), the split-export format (M2), the class_check stage (M3), the
 uploading_data stage's backgrounding/concurrency-guard/failure path (M4),
 the training_remote stage's failure/concurrency-guard path (M5), and the
-downloading_model stage's failure/validation path (M6).
+downloading_model stage's failure/validation path (M6), and the testing
+stage's precondition-failure path (M7).
 
 Live-HTTP integration tests, following the same idiom as
 test_iteration9_new_endpoints.py / test_iteration11_routers_nudge_obb.py: real
@@ -92,6 +93,21 @@ def _create_run(hdr, pid):
     return r.json()
 
 
+def _create_merge_run(hdr, pid, db):
+    """After M7, `deploying` is the only stage left as a generic stub, and
+    it's blocked on bootstrap runs (M0's own guard) - every fresh project's
+    first run defaults to run_type "bootstrap", so tests that want to use a
+    stub stage as an arbitrary placeholder need a non-bootstrap run instead.
+    Creates and completes a first run, then creates a second - the second's
+    run_type is "merge" per the run-creation endpoint's own placeholder
+    derivation (bootstrap iff no prior completed run exists)."""
+    first = _create_run(hdr, pid)
+    db.pipeline_runs.update_one({"id": first["id"]}, {"$set": {"status": "completed"}})
+    run = _create_run(hdr, pid)
+    assert run["run_type"] == "merge"
+    return run
+
+
 def test_create_pipeline_run(hdr, fresh_project):
     run = _create_run(hdr, fresh_project)
     assert run["status"] == "draft"
@@ -101,15 +117,16 @@ def test_create_pipeline_run(hdr, fresh_project):
     assert run["stage_history"] == []
 
 
-def test_stage_call_marks_busy_then_clears(hdr, fresh_project):
-    """Uses testing, the one stage still left as a generic stub as of M6 -
-    uploading_data/training_remote/downloading_model all graduated to real
-    stages with their own request-body validation, so a still-generic stub
-    stage is needed here to exercise M0's original stub mechanism."""
-    run = _create_run(hdr, fresh_project)
+def test_stage_call_marks_busy_then_clears(hdr, fresh_project, db):
+    """Uses deploying (via _create_merge_run), the one stage still left as a
+    generic stub as of M7 - every other stage graduated to a real one with
+    its own request-body validation, so a still-generic stub stage (on a
+    non-bootstrap run, since deploying is blocked on bootstrap runs) is
+    needed here to exercise M0's original stub mechanism."""
+    run = _create_merge_run(hdr, fresh_project, db)
     rid = run["id"]
 
-    r = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/testing", headers=hdr)
+    r = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/deploying", headers=hdr)
     assert r.status_code == 200, r.text
     assert r.json()["busy"] is True
 
@@ -126,14 +143,14 @@ def test_stage_call_marks_busy_then_clears(hdr, fresh_project):
     assert body["stage_history"][0]["status"] == "stub_complete"
 
 
-def test_concurrent_stage_call_rejected(hdr, fresh_project):
+def test_concurrent_stage_call_rejected(hdr, fresh_project, db):
     """The M0 DoD test: two rapid stage calls on the same pipeline_id, second
-    gets 409. Uses testing (still a generic stub) for the same reason as
-    test_stage_call_marks_busy_then_clears above."""
-    run = _create_run(hdr, fresh_project)
+    gets 409. Uses deploying (still a generic stub, via _create_merge_run)
+    for the same reason as test_stage_call_marks_busy_then_clears above."""
+    run = _create_merge_run(hdr, fresh_project, db)
     rid = run["id"]
 
-    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/testing", headers=hdr)
+    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/deploying", headers=hdr)
     assert r1.status_code == 200, r1.text
 
     r2 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/class_check", headers=hdr)
@@ -323,7 +340,7 @@ def test_uploading_data_stage_returns_immediately_then_fails(hdr, fresh_project)
     assert body["error"]
 
 
-def test_uploading_data_stage_respects_concurrency_guard(hdr, fresh_project):
+def test_uploading_data_stage_respects_concurrency_guard(hdr, fresh_project, db):
     """A real closed-port connection refusal on loopback can resolve in
     under a millisecond - racing it against a second HTTP round-trip from
     this test process is not reliably observable (confirmed: flaked under
@@ -331,11 +348,13 @@ def test_uploading_data_stage_respects_concurrency_guard(hdr, fresh_project):
     test already established: the generic stub's fixed delay gives a wide,
     deterministic busy window. Calling uploading_data as the SECOND stage
     (rather than the first, like M0's test) confirms uploading_data's new
-    branch is dispatched after the shared guard check, not before it."""
-    run = _create_run(hdr, fresh_project)
+    branch is dispatched after the shared guard check, not before it.
+    Uses deploying (via _create_merge_run) as the stub-stage placeholder -
+    see _create_merge_run's docstring for why a plain bootstrap run won't do."""
+    run = _create_merge_run(hdr, fresh_project, db)
     rid = run["id"]
 
-    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/testing", headers=hdr)
+    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/deploying", headers=hdr)
     assert r1.status_code == 200, r1.text
 
     r2 = requests.post(
@@ -385,13 +404,14 @@ def test_training_remote_stage_without_dataset_export_fails(hdr, fresh_project):
     assert "uploading_data" in body["error"] or "dataset_export" in body["error"]
 
 
-def test_training_remote_stage_respects_concurrency_guard(hdr, fresh_project):
+def test_training_remote_stage_respects_concurrency_guard(hdr, fresh_project, db):
     """Same reliable mechanism as uploading_data's concurrency test: the
-    generic stub's fixed delay gives a wide, deterministic busy window."""
-    run = _create_run(hdr, fresh_project)
+    generic stub's fixed delay gives a wide, deterministic busy window.
+    Uses deploying (via _create_merge_run) as the stub-stage placeholder."""
+    run = _create_merge_run(hdr, fresh_project, db)
     rid = run["id"]
 
-    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/testing", headers=hdr)
+    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/deploying", headers=hdr)
     assert r1.status_code == 200, r1.text
 
     r2 = requests.post(
@@ -464,3 +484,27 @@ def test_downloading_model_stage_invalid_body_rejected(hdr, fresh_project):
         json={"host": "127.0.0.1"},  # missing username
     )
     assert r.status_code == 400
+
+
+# --- M7: testing stage --------------------------------------------------------
+
+def test_testing_stage_without_candidate_model_fails(hdr, fresh_project):
+    """testing needs no SSH or real Ultralytics run to reach this failure -
+    calling it before downloading_model has ever populated candidate_model
+    fails fast, mirroring M5/M6's precondition-failure tests exactly."""
+    run = _create_run(hdr, fresh_project)
+    rid = run["id"]
+
+    start = time.monotonic()
+    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/testing", headers=hdr)
+    elapsed = time.monotonic() - start
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["busy"] is True
+    assert elapsed < 5, f"stage/testing should return immediately, took {elapsed:.2f}s"
+
+    time.sleep(1)
+    r = requests.get(f"{BASE_URL}/pipeline/runs/{rid}", headers=hdr)
+    body = r.json()
+    assert body["busy"] is False
+    assert body["status"] == "failed"
+    assert "downloading_model" in body["error"]

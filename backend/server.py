@@ -106,6 +106,65 @@ async def send_invite_email(to_email: str, team_name: str, inviter_name: str, ro
         return {"sent": False, "error": str(e)[:200]}
 
 
+def send_tester_notification_email(to_emails: list, project_name: str, project_id: str,
+                                    run_id: str, app_url: str) -> dict:
+    """Send a deploy-pipeline testing-ready notification via Resend. Cloned
+    from send_invite_email (same RESEND_API_KEY guard, HTML style, params
+    shape, best-effort "fails silently" error handling) - plain sync, not
+    async, since this is called from a background thread (deployment_worker.py)
+    rather than an async route handler: there's no event loop there to
+    protect, and a sync worker can't await an async function anyway."""
+    if not RESEND_API_KEY:
+        logger.warning("RESEND_API_KEY not set; skipping email send")
+        return {"skipped": True, "reason": "no_api_key"}
+    if not to_emails:
+        return {"skipped": True, "reason": "no_recipients"}
+    review_url = f"{app_url}/projects/{project_id}/deploy?run={run_id}" if app_url else "https://app"
+    subject = f"A candidate model is ready for review in {project_name}"
+    html = f"""
+<!DOCTYPE html>
+<html>
+<body style="font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#f5f5f7; margin:0; padding:24px;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px; margin:0 auto; background:#0a0a0a; color:#f5f5f7; border-radius:12px; overflow:hidden;">
+    <tr>
+      <td style="padding:32px; border-bottom:1px solid #27272A;">
+        <div style="font-size:11px; letter-spacing:0.3em; color:#06B6D4; text-transform:uppercase;">{BRAND_NAME}</div>
+        <h1 style="font-size:24px; margin:12px 0 0; color:#f5f5f7;">A candidate model is ready for review in <span style="color:#06B6D4;">{project_name}</span></h1>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:28px 32px;">
+        <p style="font-size:15px; line-height:1.6; color:#c4c4c8; margin:0 0 24px;">
+          The deploy pipeline finished testing a retrained candidate model against the current baseline. Review the side-by-side comparison and approve or reject it.
+        </p>
+        <table role="presentation" cellpadding="0" cellspacing="0">
+          <tr>
+            <td style="border-radius:8px; background:#06B6D4;">
+              <a href="{review_url}" style="display:inline-block; padding:12px 24px; font-size:14px; font-weight:600; color:#050505; text-decoration:none; letter-spacing:0.05em;">Review Candidate</a>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:20px 32px; background:#050505; font-size:11px; color:#71717a; text-align:center;">
+        {BRAND_NAME} · Computer vision datasets, annotation &amp; training
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+""".strip()
+    params = {"from": SENDER_EMAIL, "to": to_emails, "subject": subject, "html": html}
+    try:
+        result = resend.Emails.send(params)
+        logger.info(f"Tester notification email sent to {to_emails}: {result.get('id')}")
+        return {"sent": True, "email_id": result.get("id")}
+    except Exception as e:
+        logger.error(f"Failed to send tester notification email to {to_emails}: {e}")
+        return {"sent": False, "error": str(e)[:200]}
+
+
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 

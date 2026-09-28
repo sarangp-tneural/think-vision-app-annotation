@@ -10,10 +10,12 @@ real background-thread worker (`deployment_worker.py`, mirroring
 and runs a remote training/eval script and streams live progress back by
 regex-scraping its stdout. M6 wires in `downloading_model`, which SFTP-
 downloads the trained weights + metrics and registers a `pipeline_candidate`
-models doc. The remaining two stages (`testing`, `deploying`) still run
-through the stub until M7-M8 replace them one at a time.
-approve/reject/rollback/run-history endpoints are deliberately not built here
-(M8/M9's job) since their semantics aren't designed yet.
+models doc. M7 wires in `testing`, which needs no SSH at all - it runs local
+inference/evaluation against object storage and the currently-active model,
+then notifies reviewers. Only `deploying` still runs through the stub, until
+M8 replaces it. approve/reject/rollback/run-history endpoints are
+deliberately not built here (M8/M9's job) since their semantics aren't
+designed yet.
 """
 import asyncio
 import shlex
@@ -266,6 +268,18 @@ def register(s):
                 await asyncio.to_thread(
                     deployment_worker._pipeline_downloading_model_sync,
                     rid, run["project_id"], history_index, req.model_dump(), s.put_object, s.APP_NAME,
+                )
+            background.add_task(_job)
+            return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
+
+        if stage == "testing":
+            # No request body needed - unlike every prior real stage, testing
+            # only touches things already local or in object storage.
+            async def _job():
+                await asyncio.to_thread(
+                    deployment_worker._pipeline_testing_sync,
+                    rid, run["project_id"], history_index,
+                    s._yolo_predict_sync, s.get_object, s.send_tester_notification_email, s.APP_URL,
                 )
             background.add_task(_job)
             return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
