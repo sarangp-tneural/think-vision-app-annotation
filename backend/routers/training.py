@@ -76,6 +76,13 @@ def register(s):
         await s._log_activity(m["project_id"], current["id"], "model_activated", {"model_id": mid})
         return {"ok": True}
 
+    @router.post("/projects/{pid}/models/use-gemini")
+    async def use_gemini(pid: str, current=Depends(get_current_user)):
+        await s._project_access_check(pid, current["id"], roles=["owner", "admin"])
+        await db.models.update_many({"project_id": pid, "is_active": True}, {"$set": {"is_active": False}})
+        await s._log_activity(pid, current["id"], "gemini_selected", {})
+        return {"ok": True}
+
     @router.post("/models/{mid}/cancel")
     async def cancel_model_training(mid: str, current=Depends(get_current_user)):
         m = await db.models.find_one({"id": mid})

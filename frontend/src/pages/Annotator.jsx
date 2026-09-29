@@ -562,6 +562,18 @@ export default function Annotator() {
             <Button variant="ghost" size="sm" onClick={undo} disabled={boxes.length === 0} className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="undo-btn" title="Undo (⌘Z)">
               <Undo2 className="w-4 h-4 mr-1" /> Undo
             </Button>
+            <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.15em] text-muted-foreground" data-testid="autolabel-provider">
+              <span>
+                Using: <strong className="text-primary">{project?.active_model ? project.active_model.model_arch : "Gemini"}</strong>
+              </span>
+              <button
+                onClick={() => navigate(`/projects/${pid}/deploy`)}
+                className="underline hover:text-primary"
+                data-testid="goto-train-model-btn"
+              >
+                Train Model
+              </button>
+            </div>
             <Button
               variant="outline"
               size="sm"

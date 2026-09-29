@@ -9,7 +9,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { Rocket, Cpu, TrendingUp, Copy, Play, Zap, CheckCircle2, Loader2, AlertCircle } from "lucide-react";
+import { Rocket, Cpu, TrendingUp, Copy, Play, Zap, CheckCircle2, Loader2, AlertCircle, Sparkles } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
@@ -34,6 +34,7 @@ export default function ModelDeploy() {
   const [trainingPlan, setTrainingPlan] = useState(null);
   const [sysVersions, setSysVersions] = useState(null);
   const [activating, setActivating] = useState(null);
+  const [switchingToGemini, setSwitchingToGemini] = useState(false);
 
   const load = async () => {
     try {
@@ -103,6 +104,19 @@ export default function ModelDeploy() {
     }
   };
 
+  const useGemini = async () => {
+    setSwitchingToGemini(true);
+    try {
+      await api.post(`/projects/${pid}/models/use-gemini`);
+      toast.success("Switched auto-label back to Gemini");
+      load();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Failed to switch to Gemini");
+    } finally {
+      setSwitchingToGemini(false);
+    }
+  };
+
   const cancelTraining = async (mid) => {
     if (!window.confirm("Cancel this training run? Progress will be lost.")) return;
     try {
@@ -157,6 +171,33 @@ export default function ModelDeploy() {
           <p className="text-sm text-muted-foreground">
             Train real YOLOv8n models on your approved annotations. Once activated, the model auto-labels new images — replacing Gemini calls.
           </p>
+        </div>
+
+        <div className="panel p-5 mb-8 flex flex-wrap items-center justify-between gap-4" data-testid="autolabel-provider-row">
+          <div className="flex items-center gap-4">
+            <Sparkles className="w-4 h-4 text-primary" />
+            <div>
+              <div className="font-heading font-medium text-sm flex items-center gap-2">
+                Gemini (fallback AI)
+                {!models.some((m) => m.is_active && m.status === "trained") && (
+                  <span className="text-[9px] uppercase tracking-[0.2em] px-2 py-0.5 bg-primary text-black font-bold" data-testid="gemini-active-badge">Active</span>
+                )}
+              </div>
+              <div className="text-xs text-muted-foreground">Used for auto-labeling whenever no trained model is active.</div>
+            </div>
+          </div>
+          {models.some((m) => m.is_active && m.status === "trained") && (
+            <Button
+              size="sm"
+              onClick={useGemini}
+              disabled={switchingToGemini}
+              variant="outline"
+              className="rounded-sm border-[#27272A] bg-transparent hover:bg-[#1C1C1C] hover:border-primary hover:text-primary text-xs uppercase tracking-[0.2em]"
+              data-testid="use-gemini-btn"
+            >
+              Use Gemini
+            </Button>
+          )}
         </div>
 
         <Tabs defaultValue="real" className="space-y-6">

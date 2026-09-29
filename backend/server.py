@@ -430,6 +430,12 @@ async def _project_out(pid: str):
         if t:
             team_name = t["name"]
     settings = p.get("settings", {})
+    # Same lookup _auto_label_router uses to pick a provider - kept identical
+    # so this field can never disagree with what auto-label actually does.
+    active_model = await db.models.find_one(
+        {"project_id": pid, "is_active": True, "status": "trained"},
+        {"_id": 0, "id": 1, "model_arch": 1, "type": 1, "final_mAP": 1, "activated_at": 1},
+    )
     return {
         "id": p["id"],
         "name": p["name"],
@@ -446,6 +452,7 @@ async def _project_out(pid: str):
             "min_boxes_threshold": settings.get("min_boxes_threshold", 1),
             "show_confidence": settings.get("show_confidence", True),
         },
+        "active_model": active_model,
         "created_at": p["created_at"],
     }
 
