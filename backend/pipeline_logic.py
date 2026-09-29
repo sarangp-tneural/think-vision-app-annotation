@@ -187,20 +187,76 @@ def diff_classes(local_classes: list, remote_yaml_text: str) -> dict:
 
 
 _TRAIN_HYPERPARAMS = {
-    # Ported verbatim from cicd-pipeline-main/train.py's model.train() call.
-    # No "device" key - ultralytics auto-selects CUDA on the remote host if
-    # available, falling back to CPU; hardcoding "cpu" here previously
-    # ignored the remote machine's own GPU regardless of what it had.
-    "patience": 50, "imgsz": 640, "batch": 4, "workers": 2,
+    # Defaults follow the team's tuned fine-tuning recipe (the manual train.py
+    # run on the server); model/data/project/name/exist_ok are pipeline-owned.
+    # Keys the recipe leaves alone stay at Ultralytics' own defaults (momentum,
+    # warmup_*, hsv_*, box/cls/dfl, ...), as before. `device` defaults to GPU 0
+    # like the recipe - set it to "cpu" (or blank for auto) on a CPU-only host.
+    "patience": 7, "imgsz": 960, "batch": 16, "workers": 8,
     "cache": False, "exist_ok": True, "pretrained": True, "seed": 42,
-    "deterministic": True, "amp": False, "optimizer": "SGD", "lr0": 0.01,
+    "deterministic": True, "amp": True, "optimizer": "AdamW", "lr0": 0.001,
     "lrf": 0.01, "momentum": 0.937, "weight_decay": 0.0005, "warmup_epochs": 3,
     "warmup_momentum": 0.8, "warmup_bias_lr": 0.1, "cos_lr": True,
-    "close_mosaic": 20, "box": 7.5, "cls": 0.5, "dfl": 1.5, "hsv_h": 0.015,
-    "hsv_s": 0.7, "hsv_v": 0.4, "degrees": 5, "translate": 0.1, "scale": 0.5,
-    "shear": 2, "fliplr": 0.5, "mosaic": 1.0, "mixup": 0.20, "copy_paste": 0.60,
-    "erasing": 0.4, "val": True, "plots": True, "save": True, "verbose": True,
+    "close_mosaic": 10, "box": 7.5, "cls": 0.5, "dfl": 1.5, "hsv_h": 0.015,
+    "hsv_s": 0.7, "hsv_v": 0.4, "degrees": 3.0, "translate": 0.1, "scale": 0.5,
+    "shear": 2.0, "fliplr": 0.5, "flipud": 0.0, "mosaic": 0.5, "mixup": 0.0,
+    "copy_paste": 0.0, "erasing": 0.4, "val": True, "plots": True, "save": True,
+    "save_period": 5, "device": 0, "verbose": True,
 }
+
+# User-editable subset (the keys are pasted into the generated script as
+# `k=`, so anything not listed here is rejected rather than trusted).
+TRAIN_PARAM_TYPES = {
+    "imgsz": int, "batch": int, "lr0": float, "lrf": float, "optimizer": str,
+    "weight_decay": float, "mosaic": float, "close_mosaic": int, "mixup": float,
+    "copy_paste": float, "degrees": float, "translate": float, "scale": float,
+    "shear": float, "fliplr": float, "flipud": float, "device": "device",
+    "workers": int, "amp": bool, "cache": bool, "val": bool, "plots": bool,
+    "save": bool, "save_period": int, "patience": int, "seed": int,
+}
+_OPTIMIZERS = {"SGD", "Adam", "Adamax", "AdamW", "NAdam", "RAdam", "RMSProp", "auto"}
+
+
+def _coerce_bool(v):
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str) and v.strip().lower() in ("true", "false"):
+        return v.strip().lower() == "true"
+    raise ValueError(f"expected true/false, got {v!r}")
+
+
+def sanitize_hyperparams(hp) -> dict:
+    """Validates/coerces user-supplied training settings against
+    TRAIN_PARAM_TYPES. Unknown keys raise ValueError; blank values are
+    dropped (falls back to the default)."""
+    out = {}
+    for key, raw in (hp or {}).items():
+        if key not in TRAIN_PARAM_TYPES:
+            raise ValueError(f"unknown training setting: {key!r}")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            continue
+        typ = TRAIN_PARAM_TYPES[key]
+        if typ == "device":
+            v = str(raw).strip().lower()
+            if v in ("cpu", "mps"):
+                out[key] = v
+            elif all(part.strip().isdigit() for part in v.split(",")):
+                ids = [int(part) for part in v.split(",")]
+                out[key] = ids[0] if len(ids) == 1 else ids
+            else:
+                raise ValueError(f"device must be a GPU index, comma list, or cpu: {raw!r}")
+        elif typ is bool:
+            out[key] = _coerce_bool(raw)
+        elif typ is str:
+            if raw not in _OPTIMIZERS:
+                raise ValueError(f"optimizer must be one of {sorted(_OPTIMIZERS)}")
+            out[key] = raw
+        else:
+            try:
+                out[key] = typ(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a {typ.__name__}: {raw!r}")
+    return out
 
 
 def render_train_eval_script(params: dict) -> str:
@@ -217,6 +273,7 @@ def render_train_eval_script(params: dict) -> str:
     run_name, metrics_json_path.
     """
     train_kwargs = dict(_TRAIN_HYPERPARAMS)
+    train_kwargs.update(sanitize_hyperparams(params.get("hyperparams")))
     train_kwargs.update({
         "data": params["data_yaml_path"],
         "epochs": params["epochs"],
@@ -231,6 +288,7 @@ def render_train_eval_script(params: dict) -> str:
 
     return f'''\
 import json
+from pathlib import Path
 from ultralytics import YOLO
 
 model = YOLO({checkpoint_path!r})
@@ -238,7 +296,14 @@ model.train(
     {train_kwargs_src},
 )
 
-eval_model = YOLO({best_pt_path!r})
+# Evaluate the weights Ultralytics actually wrote (its save_dir can differ
+# from the requested project/name), falling back to the expected location.
+best_pt = Path(model.trainer.save_dir) / "weights" / "best.pt"
+if not best_pt.exists():
+    best_pt = Path({best_pt_path!r})
+if not best_pt.exists():
+    raise SystemExit("best.pt not found (looked in " + str(model.trainer.save_dir) + " and " + {best_pt_path!r} + ")")
+eval_model = YOLO(str(best_pt))
 results = eval_model.val(data={data_yaml_path!r}, split="val", verbose=False)
 metrics = {{
     "map50": float(results.box.map50),

@@ -196,3 +196,46 @@ def test_normalize_venv_dir():
     for raw in ("/v", "/v/", " /v ", "/v/bin/activate", "/v/bin/python", "/v/bin/python3", "/v/bin"):
         assert pl.normalize_venv_dir(raw) == "/v", raw
     assert pl.normalize_venv_dir("") == ""
+
+
+def test_sanitize_hyperparams():
+    import pytest
+
+    assert pl.sanitize_hyperparams({"batch": "8", "amp": "false", "device": "0,1", "lr0": "", "optimizer": "SGD"}) == {
+        "batch": 8, "amp": False, "device": [0, 1], "optimizer": "SGD",
+    }
+    assert pl.sanitize_hyperparams({"device": "cpu"}) == {"device": "cpu"}
+    for bad in ({"model": "x"}, {"data": "y"}, {"batch": "abc"}, {"optimizer": "evil()"}, {"device": "0; rm"}):
+        with pytest.raises(ValueError):
+            pl.sanitize_hyperparams(bad)
+
+
+def test_render_script_uses_recipe_defaults_and_user_overrides():
+    params = {
+        "checkpoint_path": "m.pt", "data_yaml_path": "/d/data.yaml", "epochs": 30,
+        "project_dir": "/p/runs", "run_name": "r", "metrics_json_path": "/p/m.json",
+    }
+    script = pl.render_train_eval_script(params)
+    for expected in ("imgsz=960", "batch=16", "optimizer='AdamW'", "lr0=0.001", "patience=7",
+                     "device=0", "save_period=5", "mosaic=0.5", "epochs=30"):
+        assert expected in script, expected
+    assert "model.trainer.save_dir" in script
+
+    script = pl.render_train_eval_script({**params, "hyperparams": {"batch": 8}})
+    assert "batch=8" in script and "batch=16" not in script
+    # pipeline-owned keys can't be smuggled in through hyperparams
+    import pytest
+    with pytest.raises(ValueError):
+        pl.render_train_eval_script({**params, "hyperparams": {"project": "/etc"}})
+
+
+def test_training_request_rejects_unknown_hyperparam():
+    import pytest
+    from pydantic import ValidationError
+    from schemas.deployment import TrainingRemoteRequest
+
+    base = dict(host="h", username="u", remote_workdir="/w")
+    assert TrainingRemoteRequest(**base, hyperparams={"batch": "4"}).hyperparams == {"batch": 4}
+    assert TrainingRemoteRequest(**base).epochs == 30
+    with pytest.raises(ValidationError):
+        TrainingRemoteRequest(**base, hyperparams={"data": "x"})

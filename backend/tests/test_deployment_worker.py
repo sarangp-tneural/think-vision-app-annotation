@@ -1025,3 +1025,32 @@ def test_upload_into_existing_skips_known_images_refreshes_labels_and_keeps_spli
     assert "/d/train/images/a.jpg" not in puts and "/d/valid/images/a.jpg" not in puts  # not re-uploaded
     assert "/d/train/labels/a.txt" in puts  # label refreshed where the image already lives
     assert "/d/train/images/b.jpg" in puts and "/d/train/labels/b.txt" in puts
+
+
+def test_training_remote_resolves_relative_workdir_and_reports_stderr():
+    db = MongoClient(MONGO_URL)[DB_NAME]
+    pid, rid = _seed_run_with_dataset_export(db, run_type="bootstrap")
+    try:
+        uploaded = {}
+
+        def fake_stream(client, cmd, on_output=None, **kwargs):
+            return 1, "", "FileNotFoundError: best.pt missing"
+
+        sftp_client = MagicMock()
+        sftp_client.open_sftp.return_value.normalize.return_value = "/root"
+        with patch("deployment_worker.ssh_helper.connect") as mock_connect, \
+             patch("deployment_worker.ssh_helper.upload_file",
+                   side_effect=lambda c, local, remote, **kw: uploaded.update(script=remote)), \
+             patch("deployment_worker.ssh_helper.exec_command_streaming", side_effect=fake_stream):
+            mock_connect.return_value.__enter__.return_value = sftp_client
+            mock_connect.return_value.__exit__.return_value = False
+            deployment_worker._pipeline_training_remote_sync(
+                rid, pid, 0, {**_BASE_REQ, "remote_workdir": "testing_pipeline"}
+            )
+
+        assert uploaded["script"] == f"/root/testing_pipeline/runs/run_{rid[:8]}/train_eval.py"
+        run = db.pipeline_runs.find_one({"id": rid})
+        assert run["status"] == "failed"
+        assert "FileNotFoundError: best.pt missing" in run["error"]
+    finally:
+        _cleanup(db, pid, rid)

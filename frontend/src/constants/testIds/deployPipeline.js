@@ -35,5 +35,6 @@ export const DEPLOY_PIPELINE = {
   scanModelsButton: 'deploy-pipeline-scan-models-button',
   modelChoiceRadio: 'deploy-pipeline-model-choice-radio',
   yoloModelSelect: 'deploy-pipeline-yolo-model-select',
+  trainingSettings: 'deploy-pipeline-training-settings',
   progressBar: 'deploy-pipeline-progress-bar',
 };

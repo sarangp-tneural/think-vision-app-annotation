@@ -60,6 +60,7 @@ def _fetch_remote_yaml_sync(req: ClassCheckRequest, yaml_path: str) -> str:
     directly from an async def, matching this codebase's existing convention
     for blocking I/O (_train_yolo_sync, the resend email send)."""
     with ssh_helper.connect(req.host, req.port, req.username, req.pem_key, req.password) as client:
+        yaml_path = ssh_helper.resolve_remote_path(client, yaml_path)
         cmd = f"cat {shlex.quote(yaml_path)}"
         exit_code, out, err = ssh_helper.exec_command(client, cmd)
         if exit_code != 0:
@@ -114,12 +115,14 @@ def _inspect_remote_sync(req: InspectRemoteRequest) -> dict:
     anywhere under the workdir (any file name/depth up to 5, not just
     data.yaml), plus an optional explicit extra_yaml_path, and validates an
     optional venv."""
-    workdir = req.remote_workdir.rstrip("/") or "/"
     datasets = []
     with ssh_helper.connect(req.host, req.port, req.username, req.pem_key, req.password) as client:
+        workdir = ssh_helper.resolve_remote_path(client, req.remote_workdir)
+        venv_path = ssh_helper.resolve_remote_path(client, req.venv_path) if req.venv_path else None
+        extra_yaml = ssh_helper.resolve_remote_path(client, req.extra_yaml_path) if req.extra_yaml_path else None
         candidates = []
-        if req.extra_yaml_path:
-            candidates.append(req.extra_yaml_path)
+        if extra_yaml:
+            candidates.append(extra_yaml)
         _code, out, _err = ssh_helper.exec_command(
             client, _YAML_FIND_CMD.format(root=shlex.quote(workdir))
         )
@@ -141,11 +144,12 @@ def _inspect_remote_sync(req: InspectRemoteRequest) -> dict:
                 except ValueError:
                     pass
         venv_ok = None
-        if req.venv_path:
-            venv_dir = pipeline_logic.normalize_venv_dir(req.venv_path)
+        if venv_path:
+            venv_dir = pipeline_logic.normalize_venv_dir(venv_path)
             venv_ok = ssh_helper.remote_exists(client, f"{venv_dir}/bin/activate")
     first = datasets[0] if datasets else {}
     return {
+        "workdir": workdir,
         "found": bool(datasets),
         "datasets": datasets,
         # kept for compatibility with the single-dataset shape
@@ -294,11 +298,12 @@ def register(s):
             req = InspectRemoteRequest(**body)
         except ValidationError as e:
             raise HTTPException(status_code=400, detail=f"Invalid inspect_remote request: {e}")
-        await _remember_workdir(run["pipeline_id"], req.remote_workdir)
         try:
-            return await asyncio.to_thread(_inspect_remote_sync, req)
+            result = await asyncio.to_thread(_inspect_remote_sync, req)
+            await _remember_workdir(run["pipeline_id"], result["workdir"])
+            return result
         except ssh_helper.SSHConnectionError as e:
-            raise HTTPException(status_code=502, detail=str(e)[:500])
+            raise HTTPException(status_code=502, detail=str(e)[:2000])
 
     @router.post("/pipeline/runs/{rid}/stage/{stage}")
     async def run_stage(
@@ -387,7 +392,7 @@ def register(s):
                             "busy": False,
                             "updated_at": finished,
                             "status": "failed",
-                            "error": str(e)[:500],
+                            "error": str(e)[:2000],
                             f"stage_history.{history_index}.status": "failed",
                             f"stage_history.{history_index}.finished_at": finished,
                         }

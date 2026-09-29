@@ -353,6 +353,24 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_PATH_KEYS = (
+    "remote_workdir", "venv_path", "start_from_path", "existing_data_yaml_path",
+    "remote_base_model_path", "remote_production_model_path",
+)
+
+
+def _resolve_req_paths(req: dict, keys=_PATH_KEYS) -> dict:
+    """Returns req with every non-absolute remote path in `keys` resolved
+    against the remote home (see ssh_helper.resolve_remote_path). Opens an
+    SSH session only if something actually needs resolving."""
+    todo = [k for k in keys if (req.get(k) or "").strip() and not req[k].strip().startswith("/")]
+    if not todo:
+        return req
+    with ssh_helper.connect(req["host"], req["port"], req["username"],
+                             req.get("pem_key"), req.get("password")) as client:
+        return {**req, **{k: ssh_helper.resolve_remote_path(client, req[k]) for k in todo}}
+
+
 def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: int,
                                    req: dict, get_object_fn) -> None:
     """Builds the split dataset dir (M2's layout) and SCPs it to
@@ -365,6 +383,12 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
         project = sync_db.projects.find_one({"id": project_id})
         classes = (project or {}).get("classes", [])
 
+        req = _resolve_req_paths(req)
+        _run_doc = sync_db.pipeline_runs.find_one({"id": run_id}, {"pipeline_id": 1}) or {}
+        if _run_doc.get("pipeline_id") and req.get("remote_workdir"):
+            sync_db.deployment_pipelines.update_one(
+                {"id": _run_doc["pipeline_id"]}, {"$set": {"remote_workdir": req["remote_workdir"]}}
+            )
         dataset_mode = req.get("dataset_mode", "new")
         report = _make_progress_reporter(sync_db, run_id)
         report("preparing", 0, 1)
@@ -475,7 +499,7 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
                 "busy": False,
                 "updated_at": finished,
                 "status": "failed",
-                "error": str(e)[:500],
+                "error": str(e)[:2000],
                 f"stage_history.{history_index}.status": "failed",
                 f"stage_history.{history_index}.finished_at": finished,
             }},
@@ -554,6 +578,7 @@ def _pipeline_training_remote_sync(run_id: str, project_id: str, history_index: 
     started_at = _now_iso()
     local_script_path = None
     try:
+        req = _resolve_req_paths(req)
         run = sync_db.pipeline_runs.find_one({"id": run_id})
         if not run:
             raise Exception("pipeline run not found")
@@ -594,6 +619,7 @@ def _pipeline_training_remote_sync(run_id: str, project_id: str, history_index: 
             "checkpoint_path": checkpoint_path,
             "data_yaml_path": data_yaml_path,
             "epochs": req["epochs"],
+            "hyperparams": req.get("hyperparams") or {},
             "project_dir": project_dir,
             "run_name": run_name,
             "metrics_json_path": metrics_json_path,
@@ -644,7 +670,7 @@ def _pipeline_training_remote_sync(run_id: str, project_id: str, history_index: 
                 run_cmd = f"bash -c {shlex.quote(f'{python_bin} -u {shlex.quote(remote_script_path)}')}"
             else:
                 run_cmd = f"{shlex.quote(python_bin)} -u {shlex.quote(remote_script_path)}"
-            exit_code, _out, _err = ssh_helper.exec_command_streaming(
+            exit_code, _out, run_err = ssh_helper.exec_command_streaming(
                 client, run_cmd, on_output=_on_output,
             )
 
@@ -659,7 +685,12 @@ def _pipeline_training_remote_sync(run_id: str, project_id: str, history_index: 
                 )
 
         if exit_code != 0:
-            raise Exception(f"remote training script exited {exit_code}: {progress['log_tail'][-500:]}")
+            # The traceback is on stderr, which the stdout-scraped log_tail
+            # never contains - include both so the failure is diagnosable.
+            raise Exception(
+                f"remote training script exited {exit_code}: "
+                f"{(run_err or '').strip()[-1500:]} | {progress['log_tail'][-500:]}"
+            )
 
         finished = _now_iso()
         sync_db.pipeline_runs.update_one(
@@ -689,7 +720,7 @@ def _pipeline_training_remote_sync(run_id: str, project_id: str, history_index: 
                 "busy": False,
                 "updated_at": finished,
                 "status": "failed",
-                "error": str(e)[:500],
+                "error": str(e)[:2000],
                 f"stage_history.{history_index}.status": "failed",
                 f"stage_history.{history_index}.finished_at": finished,
             }},
@@ -806,7 +837,7 @@ def _pipeline_downloading_model_sync(run_id: str, project_id: str, history_index
                 "busy": False,
                 "updated_at": finished,
                 "status": "failed",
-                "error": str(e)[:500],
+                "error": str(e)[:2000],
                 f"stage_history.{history_index}.status": "failed",
                 f"stage_history.{history_index}.finished_at": finished,
             }},
@@ -1000,7 +1031,7 @@ def _pipeline_testing_sync(run_id: str, project_id: str, history_index: int,
                 "busy": False,
                 "updated_at": finished,
                 "status": "failed",
-                "error": str(e)[:500],
+                "error": str(e)[:2000],
                 f"stage_history.{history_index}.status": "failed",
                 f"stage_history.{history_index}.finished_at": finished,
             }},
@@ -1029,6 +1060,7 @@ def _pipeline_deploying_sync(run_id: str, project_id: str, history_index: int,
     sync_db = sync_client[DB_NAME]
     local_candidate_pt = None
     try:
+        req = _resolve_req_paths(req)
         run = sync_db.pipeline_runs.find_one({"id": run_id})
         if not run:
             raise Exception("pipeline run not found")
@@ -1093,7 +1125,7 @@ def _pipeline_deploying_sync(run_id: str, project_id: str, history_index: int,
                 "busy": False,
                 "updated_at": finished,
                 "status": "failed",
-                "error": str(e)[:500],
+                "error": str(e)[:2000],
                 f"stage_history.{history_index}.status": "failed",
                 f"stage_history.{history_index}.finished_at": finished,
             }},
@@ -1115,6 +1147,7 @@ def _pipeline_rollback_sync(run_id: str, project_id: str, history_index: int, re
     sync_db = sync_client[DB_NAME]
     local_bak1_pt = None
     try:
+        req = _resolve_req_paths(req)
         run = sync_db.pipeline_runs.find_one({"id": run_id})
         if not run:
             raise Exception("pipeline run not found")
@@ -1159,7 +1192,7 @@ def _pipeline_rollback_sync(run_id: str, project_id: str, history_index: int, re
                 "busy": False,
                 "updated_at": finished,
                 "status": "failed",
-                "error": str(e)[:500],
+                "error": str(e)[:2000],
                 f"stage_history.{history_index}.status": "failed",
                 f"stage_history.{history_index}.finished_at": finished,
             }},

@@ -9,7 +9,9 @@ or cached anywhere.
 """
 from typing import Literal, Optional
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
+
+import pipeline_logic
 
 
 class SSHCredentials(BaseModel):
@@ -72,11 +74,19 @@ class TrainingRemoteRequest(SSHCredentials):
     yolo_model: Optional[str] = None
     remote_base_model_path: Optional[str] = None
     remote_production_model_path: Optional[str] = None
-    epochs: int = 10
+    epochs: int = 30
+    # Editable training settings (see pipeline_logic.TRAIN_PARAM_TYPES);
+    # unknown keys are rejected since they end up in a generated script.
+    hyperparams: dict = {}
     # "system": bare python3. "existing": {venv_path}/bin/python. "create":
     # build {remote_workdir}/venv and pip install dependencies into it.
     env_mode: Literal["system", "existing", "create"] = "system"
     venv_path: Optional[str] = None
+
+    @field_validator("hyperparams")
+    @classmethod
+    def _check_hyperparams(cls, v):
+        return pipeline_logic.sanitize_hyperparams(v)
 
     @model_validator(mode="after")
     def _venv_path_required(self):

@@ -390,3 +390,21 @@ def test_test_connection_returns_false_message_on_connect_failure(mock_connect):
 
     assert ok is False
     assert msg == "boom"
+
+
+def test_resolve_remote_path_makes_paths_absolute():
+    sftp = MagicMock()
+    sftp.normalize.return_value = "/root"
+    client = MagicMock()
+    client.open_sftp.return_value = sftp
+
+    assert ssh_helper.resolve_remote_path(client, "testing_pipeline") == "/root/testing_pipeline"
+    assert ssh_helper.resolve_remote_path(client, "~/a//b/") == "/root/a/b"
+    assert ssh_helper.resolve_remote_path(client, "~") == "/root"
+    assert ssh_helper.resolve_remote_path(client, "") == "/root"
+
+
+def test_resolve_remote_path_absolute_needs_no_round_trip():
+    client = MagicMock()
+    assert ssh_helper.resolve_remote_path(client, "/srv//work/") == "/srv/work"
+    client.open_sftp.assert_not_called()

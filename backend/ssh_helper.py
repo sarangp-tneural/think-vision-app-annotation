@@ -143,6 +143,27 @@ def _ensure_remote_dir(sftp: paramiko.SFTPClient, remote_dir: str) -> None:
             sftp.mkdir(current)
 
 
+def resolve_remote_path(client: paramiko.SSHClient, path: str) -> str:
+    """Makes a user-typed remote path absolute. SFTP resolves relative paths
+    against the login home, but tools we launch over SSH (Ultralytics'
+    `project`, `bash -c`) don't - a relative project dir silently lands under
+    runs/detect/. Absolute paths are returned untouched with no round trip;
+    `~`, `~/x`, and relative paths are joined onto the home dir."""
+    p = (path or "").strip()
+    if p.startswith("/"):
+        return "/" + "/".join(x for x in p.split("/") if x) if p != "/" else "/"
+    sftp = client.open_sftp()
+    try:
+        home = sftp.normalize(".").rstrip("/") or "/"
+    finally:
+        sftp.close()
+    if p in ("", "~", "."):
+        return home
+    if p.startswith("~/"):
+        p = p[2:]
+    return home + "/" + "/".join(x for x in p.split("/") if x)
+
+
 def remote_exists(client: paramiko.SSHClient, path: str) -> bool:
     sftp = client.open_sftp()
     try:

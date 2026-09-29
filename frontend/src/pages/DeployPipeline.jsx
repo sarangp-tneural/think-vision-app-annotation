@@ -11,6 +11,23 @@ import { DEPLOY_PIPELINE as T } from "@/constants/testIds";
 
 const COLORS = ["#06B6D4", "#D946EF", "#EAB308", "#22C55E", "#EF4444", "#F97316", "#3B82F6"];
 
+// Defaults follow the team's manual fine-tuning recipe (train.py on the server).
+const HP_DEFAULTS = {
+  imgsz: 960, batch: 16, lr0: 0.001, lrf: 0.01, optimizer: "AdamW", weight_decay: 0.0005,
+  mosaic: 0.5, close_mosaic: 10, mixup: 0.0, copy_paste: 0.0, degrees: 3.0, translate: 0.1,
+  scale: 0.5, shear: 2.0, fliplr: 0.5, flipud: 0.0, device: "0", workers: 8, amp: true,
+  cache: false, val: true, plots: true, save: true, save_period: 5, patience: 7, seed: 42,
+};
+const HP_GROUPS = [
+  { title: "Training", keys: ["imgsz", "batch"] },
+  { title: "Fine-tuning", keys: ["lr0", "lrf"] },
+  { title: "Optimizer", keys: ["optimizer", "weight_decay"] },
+  { title: "Augmentation", keys: ["mosaic", "close_mosaic", "mixup", "copy_paste", "degrees", "translate", "scale", "shear", "fliplr", "flipud"] },
+  { title: "Performance", keys: ["device", "workers", "amp", "cache"] },
+  { title: "Saving & stopping", keys: ["save_period", "patience", "seed", "val", "plots", "save"] },
+];
+const HP_OPTIMIZERS = ["SGD", "Adam", "Adamax", "AdamW", "NAdam", "RAdam", "RMSProp", "auto"];
+
 const TERMINAL_STATUSES = ["completed", "rejected"];
 const BUSY_STAGE_LABEL = {
   uploading_data: "Uploading dataset to remote host...",
@@ -111,12 +128,14 @@ export default function DeployPipeline({ pid, project }) {
     host: "", port: 22, username: "", password: "", pem_key: "",
     remote_workdir: "", remote_data_yaml_path: "",
     remote_base_model_path: "", remote_production_model_path: "",
-    train_pct: 0.7, valid_pct: 0.2, test_pct: 0.1, epochs: 10,
+    train_pct: 0.7, valid_pct: 0.2, test_pct: 0.1, epochs: 30,
     env_mode: "system", venv_path: "",
     model_choice: "yolo", yolo_model: "yolov8n.pt",
     dataset_mode: "new", existing_data_yaml_path: "", extra_yaml_path: "",
   });
   const [remoteInfo, setRemoteInfo] = useState(null);
+  const [hp, setHp] = useState(HP_DEFAULTS);
+  const setHpField = (key) => (e) => setHp((h) => ({ ...h, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value }));
   const setField = (key) => (e) => setFields((f) => ({ ...f, [key]: e.target.value }));
   // Numeric fields come off <input> as strings; coerce before every request
   // body so the backend's Pydantic int/float fields don't have to guess.
@@ -129,6 +148,12 @@ export default function DeployPipeline({ pid, project }) {
     // existing remote checkpoint or a fresh YOLO model chosen in the UI.
     const wd = (body.remote_workdir || "").replace(/\/+$/, "");
     if (!body.remote_production_model_path && wd) body.remote_production_model_path = `${wd}/models/production.pt`;
+    const hyper = {};
+    for (const [k, v] of Object.entries(hp)) {
+      if (v === "" || v === null || v === undefined) continue;
+      hyper[k] = typeof v === "boolean" || k === "optimizer" || k === "device" ? v : Number(v);
+    }
+    body.hyperparams = hyper;
     body.start_from_path = body.model_choice !== "yolo" ? body.model_choice : "";
     body.yolo_model = body.model_choice === "yolo" ? body.yolo_model : "";
     return body;
@@ -217,6 +242,7 @@ export default function DeployPipeline({ pid, project }) {
       setRemoteInfo(data);
       setFields((f) => ({
         ...f,
+        remote_workdir: data.workdir || f.remote_workdir,
         existing_data_yaml_path: data.found
           ? (data.datasets.some((d) => d.data_yaml_path === f.existing_data_yaml_path)
             ? f.existing_data_yaml_path : data.datasets[0].data_yaml_path)
@@ -475,6 +501,49 @@ export default function DeployPipeline({ pid, project }) {
                 <Input type="number" value={fields.epochs} onChange={setField("epochs")} className={inputClass} data-testid={T.epochsInput} />
               </FormField>
             </div>
+            <div className="space-y-3 border border-[#27272A] p-4" data-testid={T.trainingSettings}>
+              <div className="flex items-center justify-between">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Training settings</div>
+                <Button
+                  variant="outline" size="sm" onClick={() => setHp(HP_DEFAULTS)}
+                  className="rounded-sm h-7 text-[10px] uppercase tracking-[0.2em]"
+                >
+                  Reset to defaults
+                </Button>
+              </div>
+              {HP_GROUPS.map((g) => (
+                <div key={g.title} className="space-y-2">
+                  <div className="text-[10px] text-primary">{g.title}</div>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                    {g.keys.map((k) => (
+                      typeof HP_DEFAULTS[k] === "boolean" ? (
+                        <label key={k} className="flex items-center gap-2 text-xs cursor-pointer pt-6">
+                          <input type="checkbox" checked={!!hp[k]} onChange={setHpField(k)} className="accent-primary" />
+                          {k}
+                        </label>
+                      ) : k === "optimizer" ? (
+                        <FormField key={k} label={k}>
+                          <select value={hp[k]} onChange={setHpField(k)} className={`${inputClass} px-3 w-full`}>
+                            {HP_OPTIMIZERS.map((o) => <option key={o} value={o} className="bg-[#0a0a0a]">{o}</option>)}
+                          </select>
+                        </FormField>
+                      ) : (
+                        <FormField key={k} label={k}>
+                          <Input
+                            type={k === "device" ? "text" : "number"} step="any" value={hp[k]}
+                            onChange={setHpField(k)} className={inputClass}
+                            placeholder={k === "device" ? "0 / cpu / blank=auto" : undefined}
+                          />
+                        </FormField>
+                      )
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <div className="text-[10px] text-muted-foreground">
+                device: 0 = first GPU, 0,1 = several, cpu, or blank for auto (use cpu/blank on a server without a GPU).
+              </div>
+            </div>
             <FormField label="Starting model">
               <div className="space-y-3">
                 <Button
@@ -595,7 +664,7 @@ export default function DeployPipeline({ pid, project }) {
         <div className="space-y-4">
           <div className="p-3 bg-[#050505] border border-destructive/50 flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-destructive shrink-0 mt-0.5" />
-            <div className="text-xs text-destructive">{run.error || "This run failed."}</div>
+            <div className="text-xs text-destructive whitespace-pre-wrap break-words max-h-64 overflow-y-auto">{run.error || "This run failed."}</div>
           </div>
           {lastStage && renderStageForm(lastStage, run, `Retry ${lastStage.replace("_", " ")}`)}
         </div>
