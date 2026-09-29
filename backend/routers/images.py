@@ -157,10 +157,15 @@ def register(s):
         await db.images.update_one({"id": img_id}, {"$set": {"annotations": boxes, "annotated": len(boxes) > 0}})
         project = await db.projects.find_one({"id": img["project_id"]})
         existing = set(project.get("classes", []))
-        for b in boxes:
-            existing.add(b["label"])
-        await db.projects.update_one({"id": img["project_id"]}, {"$set": {"classes": sorted(list(existing))}})
-        return {"ok": True, "count": len(boxes)}
+        new_labels = {b["label"] for b in boxes} - existing
+        if new_labels:
+            updated_classes = sorted(existing | new_labels)
+            await db.projects.update_one({"id": img["project_id"]}, {"$set": {"classes": updated_classes}})
+        else:
+            updated_classes = project.get("classes", [])
+        # Returned so the frontend doesn't need a separate GET /projects/{pid}
+        # just to pick up newly-introduced labels after every save.
+        return {"ok": True, "count": len(boxes), "classes": updated_classes}
 
     @router.delete("/images/{img_id}")
     async def delete_image(img_id: str, current=Depends(get_current_user)):

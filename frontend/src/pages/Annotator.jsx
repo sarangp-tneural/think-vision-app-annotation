@@ -300,13 +300,13 @@ export default function Annotator() {
       // Strip client-only fields (uid) before saving
       // eslint-disable-next-line no-unused-vars
       const cleanBoxes = boxes.map(({ uid, ...rest }) => rest);
-      await api.put(`/images/${imgId}/annotations`, { boxes: cleanBoxes });
+      const { data } = await api.put(`/images/${imgId}/annotations`, { boxes: cleanBoxes });
       setDirty(false);
       setLastSaved(new Date());
       if (!isAuto) toast.success(`Saved ${boxes.length} annotations`);
-      // Refresh project classes
-      const { data } = await api.get(`/projects/${pid}`);
-      setProject(data);
+      // The PUT response already carries the (possibly-updated) class list,
+      // so no separate GET /projects/{pid} round trip is needed here.
+      setProject((p) => (p ? { ...p, classes: data.classes } : p));
     } catch (e) {
       toast.error("Save failed");
     } finally {
@@ -322,6 +322,30 @@ export default function Annotator() {
     return () => autoSaveTimer.current && clearTimeout(autoSaveTimer.current);
     // eslint-disable-next-line
   }, [boxes, dirty]);
+
+  // Prev/Next only change the imgId route param - this component instance
+  // stays mounted, so the load() effect below would otherwise overwrite an
+  // edit still sitting in the 2s auto-save debounce window before it fires
+  // (the bug: navigating away loses the just-made edit). This captures the
+  // CURRENT imgId/boxes by argument, not by reading state after navigate()
+  // has already changed it, and fires the save in the background rather
+  // than blocking navigation on it - success is silent (matching the
+  // existing auto-save convention), failure gets a toast since the user has
+  // already moved on and wouldn't otherwise know.
+  const flushSaveInBackground = (targetImgId, targetBoxes) => {
+    // eslint-disable-next-line no-unused-vars
+    const cleanBoxes = targetBoxes.map(({ uid, ...rest }) => rest);
+    api.put(`/images/${targetImgId}/annotations`, { boxes: cleanBoxes })
+      .then(({ data }) => setProject((p) => (p ? { ...p, classes: data.classes } : p)))
+      .catch(() => toast.error("Couldn't save the previous image's edits — go back and re-save"));
+  };
+
+  const goToImage = (targetId) => {
+    if (!targetId) return;
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    if (dirty) flushSaveInBackground(imgId, boxes);
+    navigate(`/projects/${pid}/annotate/${targetId}`);
+  };
 
   // Warn on unsaved-changes navigation
   useEffect(() => {
@@ -491,13 +515,13 @@ export default function Annotator() {
       <div className="border-b border-[#27272A] bg-[#0a0a0a]">
         <div className="max-w-[1600px] mx-auto px-6 py-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={() => prev && navigate(`/projects/${pid}/annotate/${prev.id}`)} disabled={!prev} className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="prev-image-btn">
+            <Button variant="ghost" size="sm" onClick={() => goToImage(prev?.id)} disabled={!prev} className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="prev-image-btn">
               <ArrowLeft className="w-4 h-4 mr-1" /> Prev
             </Button>
             <span className="text-xs text-muted-foreground px-2" data-testid="image-counter">
               {currentIdx + 1} / {images.length}
             </span>
-            <Button variant="ghost" size="sm" onClick={() => next && navigate(`/projects/${pid}/annotate/${next.id}`)} disabled={!next} className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="next-image-btn">
+            <Button variant="ghost" size="sm" onClick={() => goToImage(next?.id)} disabled={!next} className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="next-image-btn">
               Next <ArrowRight className="w-4 h-4 ml-1" />
             </Button>
 
