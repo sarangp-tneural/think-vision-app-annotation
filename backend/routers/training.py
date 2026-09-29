@@ -37,6 +37,7 @@ def register(s):
         mid = str(uuid.uuid4())
         doc = {
             "id": mid, "project_id": pid, "user_id": current["id"], "type": "real",
+            "name": None,
             "model_arch": model_arch, "epochs": effective_epochs,
             "epochs_requested": epochs, "epochs_auto_scaled": epochs == 0,
             "status": "queued", "is_active": False,
@@ -60,6 +61,16 @@ def register(s):
             raise HTTPException(status_code=404, detail="Not found")
         await s._project_access_check(m["project_id"], current["id"])
         return m
+
+    @router.patch("/models/{mid}")
+    async def rename_model(mid: str, payload: dict, current=Depends(get_current_user)):
+        m = await db.models.find_one({"id": mid})
+        if not m:
+            raise HTTPException(status_code=404, detail="Not found")
+        await s._project_access_check(m["project_id"], current["id"], roles=["owner", "admin"])
+        name = (payload.get("name") or "").strip()[:100] or None
+        await db.models.update_one({"id": mid}, {"$set": {"name": name}})
+        return {"name": name}
 
     @router.delete("/models/{mid}")
     async def delete_model(mid: str, current=Depends(get_current_user)):

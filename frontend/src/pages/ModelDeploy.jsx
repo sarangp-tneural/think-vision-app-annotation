@@ -9,7 +9,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { Rocket, Cpu, TrendingUp, Copy, Play, Zap, CheckCircle2, Loader2, AlertCircle, Sparkles } from "lucide-react";
+import { Rocket, Cpu, TrendingUp, Copy, Play, Zap, CheckCircle2, Loader2, AlertCircle, Sparkles, Pencil, Check, X } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
@@ -35,6 +35,8 @@ export default function ModelDeploy() {
   const [sysVersions, setSysVersions] = useState(null);
   const [activating, setActivating] = useState(null);
   const [switchingToGemini, setSwitchingToGemini] = useState(false);
+  const [editingModelId, setEditingModelId] = useState(null);
+  const [editModelName, setEditModelName] = useState("");
 
   const load = async () => {
     try {
@@ -126,6 +128,24 @@ export default function ModelDeploy() {
     } catch (e) {
       toast.error(e.response?.data?.detail || "Cancel failed");
     }
+  };
+
+  const startRenaming = (m) => {
+    setEditingModelId(m.id);
+    setEditModelName(m.name || "");
+  };
+
+  const saveRename = (mid) => {
+    const name = editModelName.trim();
+    setEditingModelId(null);
+    // Optimistic + background, same reasoning as class deletion elsewhere -
+    // this backend's per-request latency makes a blocking await feel stuck.
+    setModels((prev) => prev.map((m) => (m.id === mid ? { ...m, name: name || null } : m)));
+    api.patch(`/models/${mid}`, { name })
+      .catch((e) => {
+        toast.error(e.response?.data?.detail || "Rename failed");
+        load();
+      });
   };
 
   const deleteModel = async (mid) => {
@@ -353,13 +373,43 @@ export default function ModelDeploy() {
                         <Cpu className="w-4 h-4 text-primary" />
                         <div>
                           <div className="font-heading font-medium text-sm flex items-center gap-2">
-                            {m.model_arch} · {m.epochs} epochs
+                            {editingModelId === m.id ? (
+                              <>
+                                <input
+                                  autoFocus
+                                  value={editModelName}
+                                  onChange={(e) => setEditModelName(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") saveRename(m.id);
+                                    if (e.key === "Escape") setEditingModelId(null);
+                                  }}
+                                  placeholder={`${m.model_arch} · ${m.epochs} epochs`}
+                                  className="bg-transparent border border-[#27272A] focus:outline-none focus:border-primary rounded-sm px-2 py-0.5 text-sm font-heading"
+                                  data-testid={`model-name-input-${m.id}`}
+                                />
+                                <button onClick={() => saveRename(m.id)} className="text-primary hover:text-cyan-400" data-testid={`model-name-save-${m.id}`}>
+                                  <Check className="w-3.5 h-3.5" />
+                                </button>
+                                <button onClick={() => setEditingModelId(null)} className="text-muted-foreground hover:text-destructive" data-testid={`model-name-cancel-${m.id}`}>
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <span data-testid={`model-name-${m.id}`}>{m.name || `${m.model_arch} · ${m.epochs} epochs`}</span>
+                                <button onClick={() => startRenaming(m)} className="text-muted-foreground hover:text-primary" title="Rename" data-testid={`model-name-edit-${m.id}`}>
+                                  <Pencil className="w-3 h-3" />
+                                </button>
+                              </>
+                            )}
                             {m.is_active && (
                               <span className="text-[9px] uppercase tracking-[0.2em] px-2 py-0.5 bg-primary text-black font-bold" data-testid={`active-badge-${m.id}`}>Active</span>
                             )}
                           </div>
                           <div className="text-xs text-muted-foreground">
-                            {m.training_image_count} images · {new Date(m.created_at).toLocaleString()} · {m.status}
+                            {m.training_image_count} images
+                            {Array.isArray(m.classes) && ` · ${m.classes.length} classes`}
+                            {` · ${new Date(m.created_at).toLocaleString()} · ${m.status}`}
                           </div>
                         </div>
                       </div>
