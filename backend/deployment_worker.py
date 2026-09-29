@@ -179,6 +179,7 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
                     "test_count": split_info["test_count"],
                     "test_image_ids": split_info["test_image_ids"],
                     "remote_upload_path": remote_upload_path,
+                    "classes": classes,
                 },
                 f"stage_history.{history_index}.status": "succeeded",
                 f"stage_history.{history_index}.finished_at": finished,
@@ -395,12 +396,20 @@ def _pipeline_downloading_model_sync(run_id: str, project_id: str, history_index
         storage_path = f"{app_name}/projects/{project_id}/pipeline_runs/{run_id}/candidate.pt"
         put_object_fn(storage_path, weights_bytes, "application/octet-stream")
 
+        # Snapshot from uploading_data (server.py:_train_yolo_sync's direct-
+        # training counterpart to this same fix) - inference must decode this
+        # candidate's predictions against the class list it was actually
+        # trained with, not whatever the project's live class list has grown
+        # to by the time someone auto-labels with it.
+        training_classes = (run.get("dataset_export") or {}).get("classes", [])
+
         mid = str(uuid.uuid4())
         finished = _now_iso()
         sync_db.models.insert_one({
             "id": mid, "project_id": project_id, "type": "pipeline_candidate",
             "pipeline_run_id": run_id,
             "status": "trained", "is_active": False,
+            "classes": training_classes,
             "weights_path": storage_path, "weights_size": len(weights_bytes),
             "final_mAP": metrics["mAP50"], "final_loss": 1 - metrics["mAP50_95"],
             "precision": metrics["precision"], "recall": metrics["recall"],
@@ -547,15 +556,21 @@ def _pipeline_testing_sync(run_id: str, project_id: str, history_index: int,
 
         decision_gate_passed = pipeline_logic.decide_deploy(baseline_metrics["mAP50"], candidate_metrics["mAP50"])
 
+        # Each model decodes against its OWN training-time class list, not
+        # the live project list - candidate and baseline may have been
+        # trained at different times with different class snapshots.
+        candidate_classes = (run.get("dataset_export") or {}).get("classes") or classes
+        baseline_classes = (baseline.get("classes") if baseline else None) or classes
+
         sample_predictions = []
         for img_id in test_image_ids[:20]:
             img = sync_db.images.find_one({"id": img_id})
             if not img:
                 continue
             data, _ct = get_object_fn(img["storage_path"])
-            candidate_boxes = yolo_predict_fn(candidate_weights_path, data, classes, confidence)
+            candidate_boxes = yolo_predict_fn(candidate_weights_path, data, candidate_classes, confidence)
             baseline_boxes = (
-                yolo_predict_fn(baseline_weights_path, data, classes, confidence)
+                yolo_predict_fn(baseline_weights_path, data, baseline_classes, confidence)
                 if baseline_weights_path else []
             )
             sample_predictions.append({

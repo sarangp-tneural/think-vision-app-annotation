@@ -61,6 +61,16 @@ def register(s):
         await s._project_access_check(m["project_id"], current["id"])
         return m
 
+    @router.delete("/models/{mid}")
+    async def delete_model(mid: str, current=Depends(get_current_user)):
+        m = await db.models.find_one({"id": mid})
+        if not m:
+            raise HTTPException(status_code=404, detail="Not found")
+        await s._project_access_check(m["project_id"], current["id"], roles=["owner", "admin"])
+        await db.models.delete_one({"id": mid})
+        await s._log_activity(m["project_id"], current["id"], "model_deleted", {"model_id": mid})
+        return {"ok": True}
+
     @router.post("/models/{mid}/activate")
     async def activate_model(mid: str, current=Depends(get_current_user)):
         m = await db.models.find_one({"id": mid})

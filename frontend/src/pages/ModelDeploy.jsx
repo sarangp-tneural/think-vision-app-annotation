@@ -128,6 +128,17 @@ export default function ModelDeploy() {
     }
   };
 
+  const deleteModel = async (mid) => {
+    if (!window.confirm("Delete this model? This cannot be undone.")) return;
+    try {
+      await api.delete(`/models/${mid}`);
+      toast.success("Model deleted");
+      load();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Delete failed");
+    }
+  };
+
   const train = async () => {
     if (!selectedVersion) return toast.error("Select a version first");
     setTraining(true);
@@ -387,6 +398,17 @@ export default function ModelDeploy() {
                           </>
                         )}
                         {m.status === "failed" && <AlertCircle className="w-4 h-4 text-destructive" title={m.error} />}
+                        {!["queued", "preparing", "training"].includes(m.status) && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => deleteModel(m.id)}
+                            className="rounded-sm border-destructive text-destructive bg-transparent hover:bg-destructive/10 text-xs uppercase tracking-[0.2em]"
+                            data-testid={`delete-model-btn-${m.id}`}
+                          >
+                            Delete
+                          </Button>
+                        )}
                       </div>
                     </div>
                   ))}

@@ -1577,6 +1577,7 @@ def _train_yolo_sync(job_id: str, project_id: str, model_arch: str, epochs: int)
 
         sync_db.models.update_one({"id": job_id}, {"$set": {
             "status": "trained",
+            "classes": classes,  # snapshot at train time - inference must decode against this, not the live project list
             "weights_path": storage_path,
             "weights_size": len(weights_bytes),
             "final_mAP": metrics["mAP50"],
@@ -1685,8 +1686,14 @@ async def _auto_label_router(project_id: str, image_bytes: bytes, project=None) 
     model_boxes = []
     model_ran = False
     if active and active.get("weights_path"):
+        # Decode against the model's OWN training-time class list, not the
+        # live project list - the project's classes keep growing after
+        # training (new labels appended on every save + by Gemini itself),
+        # so a stale index->label mapping here silently mislabels boxes.
+        # Older model docs predating this field fall back to the live list.
+        model_classes = active.get("classes") or classes
         try:
-            model_boxes = await asyncio.to_thread(_yolo_predict_sync, active["weights_path"], image_bytes, classes, conf)
+            model_boxes = await asyncio.to_thread(_yolo_predict_sync, active["weights_path"], image_bytes, model_classes, conf)
             model_ran = True
         except Exception as e:
             logger.error(f"Local inference failed: {e}")
