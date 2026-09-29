@@ -11,15 +11,18 @@ backend/ssh_helper.py for the same "no FastAPI/server.py imports" discipline.
 import json
 import logging
 import os
+import posixpath
 import random
 import re
 import shlex
 import shutil
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import yaml
 from pymongo import MongoClient
 
 import pipeline_logic
@@ -73,13 +76,17 @@ def _yolo_label_line(a: dict, cls_to_idx: dict) -> Optional[str]:
 
 def _build_split_dataset_dir_sync(sync_db, project_id: str, classes: list,
                                    train_pct: float, valid_pct: float, test_pct: float,
-                                   get_object_fn) -> tuple:
+                                   get_object_fn, label_classes: Optional[list] = None,
+                                   yaml_root_path: Optional[str] = None,
+                                   on_progress=None) -> tuple:
     """Sync counterpart of server.py's _build_split_dataset_dir - same
     {split}/{images,labels}/ layout and shuffle/cut logic, but using a sync
     pymongo db handle and an injected get_object_fn instead of the module
     Motor db (which cannot safely be touched from this worker thread)."""
     images = list(sync_db.images.find({"project_id": project_id, "annotated": True}, {"_id": 0}).limit(2000))
-    cls_to_idx = {c: i for i, c in enumerate(classes)}
+    # label_classes overrides the index order used in label files (merge mode
+    # writes indices in the *remote* dataset's class order).
+    cls_to_idx = {c: i for i, c in enumerate(label_classes if label_classes is not None else classes)}
 
     tmp_root = tempfile.mkdtemp(prefix=f"pipeline_upload_{project_id}_")
     split_dirs = {}
@@ -103,7 +110,9 @@ def _build_split_dataset_dir_sync(sync_db, project_id: str, classes: list,
 
     counts = {"train": 0, "valid": 0, "test": 0}
     test_image_ids = []
-    for img, split in assignments:
+    for n_done, (img, split) in enumerate(assignments):
+        if on_progress:
+            on_progress(n_done, len(assignments))
         img_dir, lbl_dir = split_dirs[split]
         try:
             data, _ct = get_object_fn(img["storage_path"])
@@ -129,7 +138,7 @@ def _build_split_dataset_dir_sync(sync_db, project_id: str, classes: list,
     yaml_path = os.path.join(tmp_root, "data.yaml")
     with open(yaml_path, "w") as f:
         f.write(
-            f"path: {tmp_root}\ntrain: train/images\nval: valid/images\ntest: test/images\n"
+            f"path: {yaml_root_path or tmp_root}\ntrain: train/images\nval: valid/images\ntest: test/images\n"
             f"nc: {len(classes)}\nnames: {classes}\n"
         )
 
@@ -139,6 +148,97 @@ def _build_split_dataset_dir_sync(sync_db, project_id: str, classes: list,
         "test_count": counts["test"],
         "test_image_ids": test_image_ids,
     }
+
+
+def _ensure_usable_yaml(client, yaml_cfg: dict, yaml_path: str, yaml_dir: str, path_exists) -> str:
+    """If the yaml's `path:` doesn't point at where its data really is (older
+    uploads wrote a local temp dir there), write a corrected copy beside it
+    (`data.fixed.yaml`) and return that path so training can resolve the
+    splits. The original file is never modified. Returns yaml_path unchanged
+    when no fix is needed."""
+    if not yaml_cfg.get("path"):
+        return yaml_path
+    root = pipeline_logic.effective_yaml_root(yaml_cfg, yaml_dir, path_exists)
+    declared = str(yaml_cfg["path"]).rstrip("/")
+    declared_abs = declared if declared.startswith("/") else posixpath.normpath(posixpath.join(yaml_dir, declared))
+    if root == declared_abs:
+        return yaml_path
+    fixed_path = f"{yaml_dir}/data.fixed.yaml"
+    fixed_cfg = {**yaml_cfg, "path": root}
+    sftp = client.open_sftp()
+    try:
+        with sftp.open(fixed_path, "w") as f:
+            f.write(yaml.safe_dump(fixed_cfg, sort_keys=False))
+    finally:
+        sftp.close()
+    return fixed_path
+
+
+def _make_progress_reporter(sync_db, run_id: str, min_interval: float = 0.5):
+    """Returns report(phase, done, total) that writes run.upload_progress,
+    throttled so a 2000-image upload doesn't hammer Mongo (the final
+    done==total update is always written)."""
+    last = {"t": 0.0}
+
+    def report(phase: str, done: int, total: int) -> None:
+        now = time.monotonic()
+        if done < total and now - last["t"] < min_interval:
+            return
+        last["t"] = now
+        sync_db.pipeline_runs.update_one(
+            {"id": run_id},
+            {"$set": {"upload_progress": {"phase": phase, "done": done, "total": total}}},
+        )
+
+    return report
+
+
+def _count_local_files(root: str) -> int:
+    return sum(len(files) for _r, _d, files in os.walk(root))
+
+
+def _read_remote_text(client, path: str) -> str:
+    exit_code, out, err = ssh_helper.exec_command(client, f"cat {shlex.quote(path)}")
+    if exit_code != 0:
+        raise Exception(f"cat {path} failed (exit {exit_code}): {err.strip()}")
+    return out
+
+
+def _count_remote_files(client, path: str) -> int:
+    exit_code, out, _err = ssh_helper.exec_command(
+        client, f"find {shlex.quote(path)} -maxdepth 1 -type f 2>/dev/null | wc -l"
+    )
+    try:
+        return int(out.strip()) if exit_code == 0 else 0
+    except ValueError:
+        return 0
+
+
+def _upload_into_existing(client, tmp_root: str, split_dirs: dict, on_progress=None) -> None:
+    """Uploads tmp_root/{split}/{images,labels}/* into the remote dirs of a
+    pre-existing dataset. Never overwrites: a file already present remotely
+    is left alone."""
+    total = _count_local_files(tmp_root)
+    done = 0
+    sftp = client.open_sftp()
+    try:
+        for split, (remote_img, remote_lbl) in split_dirs.items():
+            for sub, remote_dir in (("images", remote_img), ("labels", remote_lbl)):
+                local_dir = os.path.join(tmp_root, split, sub)
+                if not os.path.isdir(local_dir):
+                    continue
+                ssh_helper._ensure_remote_dir(sftp, remote_dir)
+                for fname in os.listdir(local_dir):
+                    remote_path = f"{remote_dir}/{fname}"
+                    try:
+                        sftp.stat(remote_path)
+                    except FileNotFoundError:
+                        sftp.put(os.path.join(local_dir, fname), remote_path)
+                    done += 1
+                    if on_progress:
+                        on_progress(done, total)
+    finally:
+        sftp.close()
 
 
 def _now_iso() -> str:
@@ -157,15 +257,76 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
         project = sync_db.projects.find_one({"id": project_id})
         classes = (project or {}).get("classes", [])
 
-        tmp_root, split_info = _build_split_dataset_dir_sync(
-            sync_db, project_id, classes,
-            req["train_pct"], req["valid_pct"], req["test_pct"], get_object_fn,
-        )
+        dataset_mode = req.get("dataset_mode", "new")
+        report = _make_progress_reporter(sync_db, run_id)
+        report("preparing", 0, 1)
+        connect_args = (req["host"], req["port"], req["username"],
+                        req.get("pem_key"), req.get("password"))
 
-        remote_upload_path = f"{req['remote_workdir']}/{run_id}/dataset"
-        with ssh_helper.connect(req["host"], req["port"], req["username"],
-                                 req.get("pem_key"), req.get("password")) as client:
-            ssh_helper.upload_dir(client, tmp_root, remote_upload_path)
+        if dataset_mode == "new":
+            remote_upload_path = f"{req['remote_workdir']}/{run_id}/dataset"
+            tmp_root, split_info = _build_split_dataset_dir_sync(
+                sync_db, project_id, classes,
+                req["train_pct"], req["valid_pct"], req["test_pct"], get_object_fn,
+                yaml_root_path=remote_upload_path,
+                on_progress=lambda d, t: report("preparing", d, t),
+            )
+            data_yaml_path = f"{remote_upload_path}/data.yaml"
+            total_files = _count_local_files(tmp_root)
+            finished_files = set()
+
+            def _on_file(local_path, sent, total):
+                if sent >= total and local_path not in finished_files:
+                    finished_files.add(local_path)
+                    report("uploading", len(finished_files), total_files)
+
+            report("uploading", 0, total_files)
+            with ssh_helper.connect(*connect_args) as client:
+                ssh_helper.upload_dir(client, tmp_root, remote_upload_path, callback=_on_file)
+        else:
+            data_yaml_path = req["existing_data_yaml_path"]
+            remote_upload_path = posixpath.dirname(data_yaml_path)
+            with ssh_helper.connect(*connect_args) as client:
+                yaml_cfg = yaml.safe_load(_read_remote_text(client, data_yaml_path)) or {}
+                remote_names = pipeline_logic.names_as_list(yaml_cfg)
+                missing = [c for c in classes if c not in remote_names]
+                if missing:
+                    raise Exception(
+                        f"classes missing from remote data.yaml names: {missing}"
+                    )
+                yaml_dir = posixpath.dirname(data_yaml_path)
+                path_exists = lambda p: ssh_helper.remote_exists(client, p)  # noqa: E731
+                split_dirs = pipeline_logic.resolve_yaml_split_dirs(yaml_cfg, yaml_dir, path_exists)
+                data_yaml_path = _ensure_usable_yaml(
+                    client, yaml_cfg, data_yaml_path, yaml_dir, path_exists
+                )
+                if dataset_mode == "merge":
+                    if not split_dirs:
+                        raise Exception("remote data.yaml has no train/val/test entries to merge into")
+                    tmp_root, split_info = _build_split_dataset_dir_sync(
+                        sync_db, project_id, classes,
+                        req["train_pct"], req["valid_pct"], req["test_pct"], get_object_fn,
+                        label_classes=remote_names,
+                        on_progress=lambda d, t: report("preparing", d, t),
+                    )
+                    # A yaml with no distinct test dir folds the test split
+                    # into val (resolve_yaml_split_dirs already did that).
+                    _upload_into_existing(client, tmp_root, split_dirs,
+                                          on_progress=lambda d, t: report("uploading", d, t))
+                else:  # reuse: nothing uploaded
+                    split_info = {
+                        "train_count": _count_remote_files(client, split_dirs["train"][0]) if "train" in split_dirs else 0,
+                        "valid_count": _count_remote_files(client, split_dirs["valid"][0]) if "valid" in split_dirs else 0,
+                        "test_count": _count_remote_files(client, split_dirs["test"][0]) if "test" in split_dirs else 0,
+                        # Local testing needs images we can fetch from storage;
+                        # nothing was cut for the remote set, so use a local
+                        # sample of annotated images (may overlap remote training data).
+                        "test_image_ids": [
+                            i["id"] for i in sync_db.images.find(
+                                {"project_id": project_id, "annotated": True}, {"id": 1, "_id": 0}
+                            ).limit(50)
+                        ],
+                    }
 
         finished = _now_iso()
         sync_db.pipeline_runs.update_one(
@@ -173,12 +334,15 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
             {"$set": {
                 "busy": False,
                 "updated_at": finished,
+                "upload_progress": None,
                 "dataset_export": {
                     "train_count": split_info["train_count"],
                     "valid_count": split_info["valid_count"],
                     "test_count": split_info["test_count"],
                     "test_image_ids": split_info["test_image_ids"],
                     "remote_upload_path": remote_upload_path,
+                    "data_yaml_path": data_yaml_path,
+                    "dataset_mode": dataset_mode,
                     "classes": classes,
                 },
                 f"stage_history.{history_index}.status": "succeeded",
@@ -204,6 +368,43 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
         sync_client.close()
 
 
+def _prepare_python(client, env_mode: str, venv_path: Optional[str], workdir: str,
+                    on_output) -> str:
+    """Returns the remote interpreter path to run the training script with,
+    creating/validating a venv first when asked. Output of the setup steps is
+    streamed through on_output so it shows in the run's log tail."""
+    if env_mode == "system":
+        return "python3"
+    if env_mode == "existing":
+        python_bin = f"{venv_path.rstrip('/')}/bin/python"
+        if not ssh_helper.remote_exists(client, python_bin):
+            raise Exception(f"no python interpreter at {python_bin} - check the venv path")
+        return python_bin
+
+    venv_dir = f"{workdir.rstrip('/')}/venv"
+    python_bin = f"{venv_dir}/bin/python"
+    if not ssh_helper.remote_exists(client, python_bin):
+        on_output(f"Creating venv at {venv_dir}\n")
+        exit_code, _o, err = ssh_helper.exec_command_streaming(
+            client, f"mkdir -p {shlex.quote(workdir)} && python3 -m venv {shlex.quote(venv_dir)}",
+            on_output=on_output,
+        )
+        if exit_code != 0:
+            raise Exception(f"venv creation failed (exit {exit_code}): {err.strip()[-400:]}")
+    exit_code, _o, _e = ssh_helper.exec_command(
+        client, f"{shlex.quote(python_bin)} -c 'import ultralytics'"
+    )
+    if exit_code != 0:
+        on_output("Installing ultralytics into venv (this can take a few minutes)\n")
+        exit_code, _o, err = ssh_helper.exec_command_streaming(
+            client, f"{shlex.quote(python_bin)} -m pip install --upgrade pip ultralytics",
+            on_output=on_output,
+        )
+        if exit_code != 0:
+            raise Exception(f"pip install failed (exit {exit_code}): {err.strip()[-400:]}")
+    return python_bin
+
+
 def _pipeline_training_remote_sync(run_id: str, project_id: str, history_index: int, req: dict) -> None:
     """Renders the train/eval script (pipeline_logic.render_train_eval_script),
     SCPs it to the remote host (the data.yaml it references was already
@@ -226,7 +427,7 @@ def _pipeline_training_remote_sync(run_id: str, project_id: str, history_index: 
         remote_upload_path = dataset_export.get("remote_upload_path")
         if not remote_upload_path:
             raise Exception("no dataset_export.remote_upload_path - run uploading_data first")
-        data_yaml_path = f"{remote_upload_path}/data.yaml"
+        data_yaml_path = dataset_export.get("data_yaml_path") or f"{remote_upload_path}/data.yaml"
 
         # Branching (the M5 DoD's explicit test target): bootstrap/
         # fresh_production start from the base checkpoint; merge continues
@@ -285,11 +486,15 @@ def _pipeline_training_remote_sync(run_id: str, project_id: str, history_index: 
                     }},
                 )
 
+        env_mode = req.get("env_mode", "system")
         with ssh_helper.connect(req["host"], req["port"], req["username"],
                                  req.get("pem_key"), req.get("password")) as client:
+            python_bin = _prepare_python(client, env_mode, req.get("venv_path"),
+                                          req["remote_workdir"], _on_output)
             ssh_helper.upload_file(client, local_script_path, remote_script_path)
             exit_code, _out, _err = ssh_helper.exec_command_streaming(
-                client, f"python3 {shlex.quote(remote_script_path)}", on_output=_on_output,
+                client, f"{shlex.quote(python_bin)} -u {shlex.quote(remote_script_path)}",
+                on_output=_on_output,
             )
 
         if exit_code != 0:
@@ -305,6 +510,7 @@ def _pipeline_training_remote_sync(run_id: str, project_id: str, history_index: 
                     "base_checkpoint_ref": checkpoint_path,
                     "remote_run_dir": project_dir,
                     "hyperparams_used": params,
+                    "env": {"mode": env_mode, "python": python_bin},
                     "progress_pct": 100,
                     "log_tail": progress["log_tail"],
                     "started_at": started_at,
@@ -498,7 +704,7 @@ def _build_local_test_dataset_dir_sync(sync_db, test_image_ids: list, classes: l
     yaml_path = os.path.join(tmp_root, "data.yaml")
     with open(yaml_path, "w") as f:
         f.write(
-            f"path: {tmp_root}\ntrain: test/images\nval: test/images\ntest: test/images\n"
+            f"path: {yaml_root_path or tmp_root}\ntrain: test/images\nval: test/images\ntest: test/images\n"
             f"nc: {len(classes)}\nnames: {classes}\n"
         )
     return tmp_root, yaml_path

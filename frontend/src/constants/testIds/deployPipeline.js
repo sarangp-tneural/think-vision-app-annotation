@@ -24,5 +24,13 @@ export const DEPLOY_PIPELINE = {
   runTestsButton: 'deploy-pipeline-run-tests-button',
   approveButton: 'deploy-pipeline-approve-button',
   rejectButton: 'deploy-pipeline-reject-button',
+  inspectRemoteButton: 'deploy-pipeline-inspect-remote-button',
+  datasetModeRadio: 'deploy-pipeline-dataset-mode-radio',
+  envModeRadio: 'deploy-pipeline-env-mode-radio',
+  venvPathInput: 'deploy-pipeline-venv-path-input',
+  deleteRunButton: 'deploy-pipeline-delete-run-button',
+  uploadProgressText: 'deploy-pipeline-upload-progress-text',
+  extraYamlInput: 'deploy-pipeline-extra-yaml-input',
+  datasetOption: 'deploy-pipeline-dataset-option',
   progressBar: 'deploy-pipeline-progress-bar',
 };

@@ -21,7 +21,9 @@ run-history endpoints are deliberately not built here (M9's job) since their
 semantics aren't designed yet.
 """
 import asyncio
+import posixpath
 import shlex
+import yaml
 import uuid
 from datetime import datetime, timezone
 
@@ -35,6 +37,7 @@ from schemas.deployment import (
     ClassCheckRequest,
     DeployingRequest,
     DownloadingModelRequest,
+    InspectRemoteRequest,
     RollbackRequest,
     TrainingRemoteRequest,
     UploadingDataRequest,
@@ -52,18 +55,88 @@ VALID_STAGES = {
 }
 
 
-def _fetch_remote_yaml_sync(req: ClassCheckRequest) -> str:
+def _fetch_remote_yaml_sync(req: ClassCheckRequest, yaml_path: str) -> str:
     """Blocking (paramiko) - always run via asyncio.to_thread, never called
     directly from an async def, matching this codebase's existing convention
     for blocking I/O (_train_yolo_sync, the resend email send)."""
     with ssh_helper.connect(req.host, req.port, req.username, req.pem_key, req.password) as client:
-        cmd = f"cat {shlex.quote(req.remote_data_yaml_path)}"
+        cmd = f"cat {shlex.quote(yaml_path)}"
         exit_code, out, err = ssh_helper.exec_command(client, cmd)
         if exit_code != 0:
             raise ssh_helper.SSHConnectionError(
-                f"cat {req.remote_data_yaml_path} failed (exit {exit_code}): {err.strip()}"
+                f"cat {yaml_path} failed (exit {exit_code}): {err.strip()}"
             )
         return out
+
+
+_YAML_FIND_CMD = (
+    "find {root} -maxdepth 5 -type f \\( -name '*.yaml' -o -name '*.yml' \\) -size -256k "
+    "-not -path '*/venv/*' -not -path '*/.venv/*' -not -path '*/site-packages/*' "
+    "-not -path '*/.git/*' -not -path '*/runs/*' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -100"
+)
+
+
+def _describe_dataset_yaml(client, yaml_path: str):
+    """Returns a dataset summary dict for a remote yaml, or None if it isn't
+    a readable dataset config (needs `names` plus train/val)."""
+    exit_code, out, _err = ssh_helper.exec_command(client, f"cat {shlex.quote(yaml_path)}")
+    if exit_code != 0:
+        return None
+    try:
+        cfg = yaml.safe_load(out)
+    except yaml.YAMLError:
+        return None
+    if not pipeline_logic.looks_like_dataset_yaml(cfg):
+        return None
+    dirs = pipeline_logic.resolve_yaml_split_dirs(
+        cfg, posixpath.dirname(yaml_path),
+        path_exists=lambda p: ssh_helper.remote_exists(client, p),
+    )
+    return {
+        "data_yaml_path": yaml_path,
+        "names": pipeline_logic.names_as_list(cfg),
+        "splits": {
+            split: {"images_dir": img, "image_count": deployment_worker._count_remote_files(client, img)}
+            for split, (img, _lbl) in dirs.items()
+        },
+    }
+
+
+def _inspect_remote_sync(req: InspectRemoteRequest) -> dict:
+    """Blocking (paramiko) - run via asyncio.to_thread. Finds dataset yamls
+    anywhere under the workdir (any file name/depth up to 5, not just
+    data.yaml), plus an optional explicit extra_yaml_path, and validates an
+    optional venv."""
+    workdir = req.remote_workdir.rstrip("/") or "/"
+    datasets = []
+    with ssh_helper.connect(req.host, req.port, req.username, req.pem_key, req.password) as client:
+        candidates = []
+        if req.extra_yaml_path:
+            candidates.append(req.extra_yaml_path)
+        _code, out, _err = ssh_helper.exec_command(
+            client, _YAML_FIND_CMD.format(root=shlex.quote(workdir))
+        )
+        for line in out.splitlines():
+            _ts, _sp, path = line.partition(" ")
+            if path and path not in candidates:
+                candidates.append(path)
+        for path in candidates:
+            info = _describe_dataset_yaml(client, path)
+            if info:
+                datasets.append(info)
+        venv_ok = None
+        if req.venv_path:
+            venv_ok = ssh_helper.remote_exists(client, f"{req.venv_path.rstrip('/')}/bin/python")
+    first = datasets[0] if datasets else {}
+    return {
+        "found": bool(datasets),
+        "datasets": datasets,
+        # kept for compatibility with the single-dataset shape
+        "data_yaml_path": first.get("data_yaml_path"),
+        "names": first.get("names", []),
+        "splits": first.get("splits", {}),
+        "venv_ok": venv_ok,
+    }
 
 
 def register(s):
@@ -139,6 +212,31 @@ def register(s):
         await s._project_access_check(run["project_id"], current["id"])
         return run
 
+    @router.delete("/pipeline/runs/{rid}")
+    async def delete_pipeline_run(rid: str, current=Depends(get_current_user)):
+        """Removes a run's history entry only - nothing on the remote host or
+        in the models collection is touched. Refuses a busy run, and the run
+        currently recorded as last deployed (the Rollback button hangs off it)."""
+        run = await db.pipeline_runs.find_one({"id": rid})
+        if not run:
+            raise HTTPException(status_code=404, detail="Not found")
+        await s._project_access_check(run["project_id"], current["id"], roles=["owner", "admin"])
+        if run.get("busy"):
+            raise HTTPException(status_code=409, detail="Run is in progress and cannot be deleted")
+        pipeline = await db.deployment_pipelines.find_one({"id": run["pipeline_id"]})
+        if pipeline and pipeline.get("last_deployed_run_id") == rid:
+            raise HTTPException(status_code=409, detail="This is the last deployed run and cannot be deleted")
+        await db.pipeline_runs.delete_one({"id": rid})
+        if pipeline and pipeline.get("last_run_id") == rid:
+            latest = await db.pipeline_runs.find_one(
+                {"pipeline_id": pipeline["id"]}, {"id": 1}, sort=[("created_at", -1)]
+            )
+            await db.deployment_pipelines.update_one(
+                {"id": pipeline["id"]}, {"$set": {"last_run_id": (latest or {}).get("id")}}
+            )
+        await s._log_activity(run["project_id"], current["id"], "pipeline_run_deleted", {"run_id": rid})
+        return {"deleted": rid}
+
     @router.get("/projects/{pid}/pipeline/runs")
     async def list_pipeline_runs(pid: str, current=Depends(get_current_user)):
         """In ROADMAP.md's own §4 endpoint table but never implemented across
@@ -154,6 +252,25 @@ def register(s):
             "last_deployed_run_id": (pipeline or {}).get("last_deployed_run_id"),
             "pipeline_id": (pipeline or {}).get("id"),
         }
+
+    @router.post("/pipeline/runs/{rid}/inspect_remote")
+    async def inspect_remote(rid: str, current=Depends(get_current_user),
+                              body: dict = Body(default_factory=dict)):
+        """Read-only probe (no busy flag / stage history): reports a
+        pre-existing dataset in the remote workdir and venv validity so the
+        UI can offer merge/reuse and venv choices."""
+        run = await db.pipeline_runs.find_one({"id": rid})
+        if not run:
+            raise HTTPException(status_code=404, detail="Not found")
+        await s._project_access_check(run["project_id"], current["id"], roles=["owner", "admin"])
+        try:
+            req = InspectRemoteRequest(**body)
+        except ValidationError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid inspect_remote request: {e}")
+        try:
+            return await asyncio.to_thread(_inspect_remote_sync, req)
+        except ssh_helper.SSHConnectionError as e:
+            raise HTTPException(status_code=502, detail=str(e)[:500])
 
     @router.post("/pipeline/runs/{rid}/stage/{stage}")
     async def run_stage(
@@ -204,9 +321,19 @@ def register(s):
                 await db.pipeline_runs.update_one({"id": rid}, {"$set": {"busy": False}})
                 raise HTTPException(status_code=400, detail=f"Invalid class_check request: {e}")
 
+            # Blank path -> the yaml the upload stage already recorded (older
+            # runs only stored remote_upload_path, so derive from that).
+            de = run.get("dataset_export") or {}
+            yaml_path = (req.remote_data_yaml_path or "").strip() or de.get("data_yaml_path") or (
+                f"{de['remote_upload_path']}/data.yaml" if de.get("remote_upload_path") else None
+            )
+            if not yaml_path:
+                await db.pipeline_runs.update_one({"id": rid}, {"$set": {"busy": False}})
+                raise HTTPException(status_code=400, detail="No remote data.yaml path given and none recorded by the upload stage")
+
             finished = datetime.now(timezone.utc).isoformat()
             try:
-                remote_yaml_text = await asyncio.to_thread(_fetch_remote_yaml_sync, req)
+                remote_yaml_text = await asyncio.to_thread(_fetch_remote_yaml_sync, req, yaml_path)
                 project = await db.projects.find_one({"id": run["project_id"]}, {"classes": 1})
                 result = pipeline_logic.diff_classes(project.get("classes", []), remote_yaml_text)
                 # status stays "class_check" on match (M0's "status = last

@@ -7,9 +7,9 @@ They exist only for the lifetime of a single request or background-job call
 and should be passed by reference through function arguments, not serialized
 or cached anywhere.
 """
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class SSHCredentials(BaseModel):
@@ -28,7 +28,8 @@ class ClassCheckRequest(SSHCredentials):
     remote data.yaml path alongside credentials - fully self-contained per
     request, never read from deployment_pipelines, never persisted."""
 
-    remote_data_yaml_path: str
+    # Blank/None -> the router falls back to the yaml the upload stage recorded.
+    remote_data_yaml_path: Optional[str] = None
 
 
 class UploadingDataRequest(SSHCredentials):
@@ -40,6 +41,17 @@ class UploadingDataRequest(SSHCredentials):
     train_pct: float = 0.7
     valid_pct: float = 0.2
     test_pct: float = 0.1
+    # "new" uploads a fresh dataset to {workdir}/{run_id}/dataset. "merge"
+    # adds our images/labels into the split dirs of an existing remote
+    # dataset described by existing_data_yaml_path; "reuse" trains on it as-is.
+    dataset_mode: Literal["new", "merge", "reuse"] = "new"
+    existing_data_yaml_path: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _existing_yaml_required(self):
+        if self.dataset_mode != "new" and not self.existing_data_yaml_path:
+            raise ValueError("existing_data_yaml_path is required for dataset_mode merge/reuse")
+        return self
 
 
 class TrainingRemoteRequest(SSHCredentials):
@@ -55,6 +67,27 @@ class TrainingRemoteRequest(SSHCredentials):
     remote_base_model_path: str
     remote_production_model_path: Optional[str] = None
     epochs: int = 10
+    # "system": bare python3. "existing": {venv_path}/bin/python. "create":
+    # build {remote_workdir}/venv and pip install dependencies into it.
+    env_mode: Literal["system", "existing", "create"] = "system"
+    venv_path: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _venv_path_required(self):
+        if self.env_mode == "existing" and not self.venv_path:
+            raise ValueError("venv_path is required when env_mode is 'existing'")
+        return self
+
+
+class InspectRemoteRequest(SSHCredentials):
+    """Body for POST /pipeline/runs/{rid}/inspect_remote - read-only probe
+    for a pre-existing dataset (data.yaml) in the workdir and, optionally,
+    whether venv_path holds a usable interpreter."""
+
+    remote_workdir: str
+    venv_path: Optional[str] = None
+    # Explicit dataset yaml to inspect even if the workdir scan wouldn't find it.
+    extra_yaml_path: Optional[str] = None
 
 
 class DownloadingModelRequest(SSHCredentials):

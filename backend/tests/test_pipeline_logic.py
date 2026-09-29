@@ -134,3 +134,59 @@ def test_render_train_eval_script_embeds_params():
     assert "/runs/client1_retrained/weights/best.pt" in script
     assert "/runs/metrics.json" in script
     assert 'split="val"' in script
+
+
+def test_resolve_yaml_split_dirs_relative_path_and_test_fallback():
+    cfg = {"path": "../ds", "train": "train/images", "val": "valid/images"}
+    dirs = pl.resolve_yaml_split_dirs(cfg, "/srv/work/sub")
+    assert dirs["train"] == ("/srv/work/ds/train/images", "/srv/work/ds/train/labels")
+    assert dirs["valid"] == ("/srv/work/ds/valid/images", "/srv/work/ds/valid/labels")
+    # no test key -> falls back to val
+    assert dirs["test"] == dirs["valid"]
+
+
+def test_resolve_yaml_split_dirs_absolute_and_list_values():
+    cfg = {"train": ["/data/a/images", "/data/b/images"], "val": "/data/v/images"}
+    dirs = pl.resolve_yaml_split_dirs(cfg, "/srv/work")
+    assert dirs["train"] == ("/data/a/images", "/data/a/labels")
+
+
+def test_names_as_list_handles_dict_names():
+    assert pl.names_as_list({"names": {1: "b", 0: "a"}}) == ["a", "b"]
+
+
+def test_deployment_schemas_validate_env_and_dataset_mode():
+    import pytest
+    from pydantic import ValidationError
+    from schemas.deployment import TrainingRemoteRequest, UploadingDataRequest
+
+    base = dict(host="h", username="u", remote_workdir="/w")
+    with pytest.raises(ValidationError):
+        TrainingRemoteRequest(**base, remote_base_model_path="/m.pt", env_mode="existing")
+    assert TrainingRemoteRequest(
+        **base, remote_base_model_path="/m.pt", env_mode="existing", venv_path="/v"
+    ).env_mode == "existing"
+    with pytest.raises(ValidationError):
+        UploadingDataRequest(**base, dataset_mode="merge")
+    assert UploadingDataRequest(**base).dataset_mode == "new"
+
+
+def test_effective_yaml_root_falls_back_when_absolute_path_missing():
+    cfg = {"path": "/tmp/pipeline_upload_x", "train": "train/images", "val": "valid/images"}
+    assert pl.effective_yaml_root(cfg, "/srv/ds", path_exists=lambda p: False) == "/srv/ds"
+    assert pl.effective_yaml_root(cfg, "/srv/ds", path_exists=lambda p: True) == "/tmp/pipeline_upload_x"
+    dirs = pl.resolve_yaml_split_dirs(cfg, "/srv/ds", path_exists=lambda p: False)
+    assert dirs["train"][0] == "/srv/ds/train/images"
+
+
+def test_resolve_yaml_split_dirs_swaps_images_segment_and_roboflow_relative():
+    dirs = pl.resolve_yaml_split_dirs({"train": "images/train", "val": "images/val"}, "/d")
+    assert dirs["train"] == ("/d/images/train", "/d/labels/train")
+    rf = pl.resolve_yaml_split_dirs({"train": "../train/images", "val": "../valid/images"}, "/d/proj")
+    assert rf["train"] == ("/d/train/images", "/d/train/labels")
+
+
+def test_looks_like_dataset_yaml():
+    assert pl.looks_like_dataset_yaml({"names": ["a"], "train": "t"})
+    assert not pl.looks_like_dataset_yaml({"task": "detect", "data": "x"})  # ultralytics args.yaml
+    assert not pl.looks_like_dataset_yaml(None)

@@ -7,6 +7,7 @@ this module is pure data/ML logic, orchestration lives in routers/deployment.py
 and (from M4 onward) deployment_worker.py.
 """
 import os
+import posixpath
 
 import yaml
 
@@ -84,6 +85,65 @@ def _normalize_names(names) -> list:
     if isinstance(names, dict):
         return [names[k] for k in sorted(names.keys(), key=int)]
     return list(names or [])
+
+
+def effective_yaml_root(yaml_cfg: dict, yaml_dir: str, path_exists=None) -> str:
+    """The directory a data.yaml's split entries resolve against: its `path:`
+    (relative ones resolve against the yaml's own dir), or the yaml's dir when
+    `path:` is absent. If `path:` is absolute but path_exists(path) is False
+    (e.g. yamls from older uploads whose `path:` was a local temp dir), fall
+    back to the yaml's dir too."""
+    root = str(yaml_cfg.get("path") or "").rstrip("/")
+    if not root:
+        return yaml_dir
+    if not root.startswith("/"):
+        return posixpath.normpath(posixpath.join(yaml_dir, root))
+    if path_exists is not None and not path_exists(root):
+        return yaml_dir
+    return root
+
+
+def resolve_yaml_split_dirs(yaml_cfg: dict, yaml_dir: str, path_exists=None) -> dict:
+    """Maps split name -> (images_dir, labels_dir) on the remote host for a
+    pre-existing data.yaml. `train`/`val`/`test` entries resolve against
+    effective_yaml_root. The labels dir follows the Ultralytics convention of
+    swapping the last `images` path segment for `labels`. A missing `test`
+    key falls back to `val`; a list value uses its first entry. Returns only
+    splits that resolved."""
+    root = effective_yaml_root(yaml_cfg, yaml_dir, path_exists)
+
+    def _one(key):
+        v = yaml_cfg.get(key)
+        if isinstance(v, (list, tuple)):
+            v = v[0] if v else None
+        return v or None
+
+    def _dirs(v):
+        img = v if v.startswith("/") else posixpath.normpath(posixpath.join(root, v))
+        parts = img.split("/")
+        for i in range(len(parts) - 1, -1, -1):
+            if parts[i] == "images":
+                parts[i] = "labels"
+                break
+        else:
+            parts = img.split("/")[:-1] + ["labels"]
+        return img, "/".join(parts)
+
+    out = {}
+    train, val = _one("train"), _one("val")
+    test = _one("test") or val
+    for split, v in (("train", train), ("valid", val), ("test", test)):
+        if v:
+            out[split] = _dirs(v)
+    return out
+
+
+def looks_like_dataset_yaml(cfg) -> bool:
+    return isinstance(cfg, dict) and bool(cfg.get("names")) and bool(cfg.get("train") or cfg.get("val"))
+
+
+def names_as_list(yaml_cfg: dict) -> list:
+    return _normalize_names(yaml_cfg.get("names"))
 
 
 def diff_classes(local_classes: list, remote_yaml_text: str) -> dict:

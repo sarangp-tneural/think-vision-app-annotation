@@ -183,7 +183,7 @@ def test_training_remote_streams_progress_and_completes():
             assert mock_upload_file.call_args.args[0] is mock_client
             assert mock_upload_file.call_args.args[2] == f"/srv/work/{rid}/train_eval.py"
             mock_exec.assert_called_once()
-            assert mock_exec.call_args.args[1] == f"python3 /srv/work/{rid}/train_eval.py"
+            assert mock_exec.call_args.args[1] == f"python3 -u /srv/work/{rid}/train_eval.py"
 
         # Each epoch line triggered its own, distinct Mongo write - not just
         # a single write at the very end.
@@ -892,3 +892,82 @@ def test_rollback_without_bak1_fails_and_writes_nothing():
             p.stop()
         db.projects.delete_one({"id": pid})
         db.pipeline_runs.delete_one({"id": rid})
+
+
+def _fake_client_for_env(existing_paths, import_exit=0):
+    """Returns (client, commands) - commands collects every shell command run."""
+    commands = []
+
+    def _exec(client, cmd, timeout=None):
+        commands.append(cmd)
+        return (import_exit if "import ultralytics" in cmd else 0), "", ""
+
+    def _stream(client, cmd, on_output=None, **kw):
+        commands.append(cmd)
+        return 0, "", ""
+
+    return _exec, _stream, commands
+
+
+def test_prepare_python_modes():
+    client = MagicMock()
+    assert deployment_worker._prepare_python(client, "system", None, "/w", lambda _c: None) == "python3"
+
+    with patch.object(ssh_helper, "remote_exists", return_value=True):
+        assert deployment_worker._prepare_python(
+            client, "existing", "/opt/venv/", "/w", lambda _c: None
+        ) == "/opt/venv/bin/python"
+
+    with patch.object(ssh_helper, "remote_exists", return_value=False):
+        try:
+            deployment_worker._prepare_python(client, "existing", "/nope", "/w", lambda _c: None)
+            assert False, "expected missing venv to raise"
+        except Exception as e:
+            assert "/nope/bin/python" in str(e)
+
+
+def test_prepare_python_create_makes_venv_and_installs():
+    exec_fn, stream_fn, commands = _fake_client_for_env(set(), import_exit=1)
+    with patch.object(ssh_helper, "remote_exists", return_value=False), \
+         patch.object(ssh_helper, "exec_command", side_effect=exec_fn), \
+         patch.object(ssh_helper, "exec_command_streaming", side_effect=stream_fn):
+        py = deployment_worker._prepare_python(MagicMock(), "create", None, "/w/", lambda _c: None)
+    assert py == "/w/venv/bin/python"
+    assert any("-m venv /w/venv" in c for c in commands)
+    assert any("pip install" in c and "ultralytics" in c for c in commands)
+
+
+def test_prepare_python_create_skips_install_when_present():
+    exec_fn, stream_fn, commands = _fake_client_for_env(set(), import_exit=0)
+    with patch.object(ssh_helper, "remote_exists", return_value=True), \
+         patch.object(ssh_helper, "exec_command", side_effect=exec_fn), \
+         patch.object(ssh_helper, "exec_command_streaming", side_effect=stream_fn):
+        deployment_worker._prepare_python(MagicMock(), "create", None, "/w", lambda _c: None)
+    assert not any("pip install" in c for c in commands)
+
+
+def test_ensure_usable_yaml_writes_fixed_copy_when_path_is_stale():
+    import yaml as _yaml
+
+    written = {}
+
+    class _F:
+        def __init__(self, p): self.p = p
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def write(self, text): written[self.p] = text
+
+    sftp = MagicMock()
+    sftp.open.side_effect = lambda p, mode: _F(p)
+    client = MagicMock()
+    client.open_sftp.return_value = sftp
+
+    cfg = {"path": "/tmp/pipeline_upload_x", "train": "train/images", "val": "valid/images", "names": ["a"]}
+    out = deployment_worker._ensure_usable_yaml(client, cfg, "/srv/ds/data.yaml", "/srv/ds", lambda p: False)
+    assert out == "/srv/ds/data.fixed.yaml"
+    assert _yaml.safe_load(written[out])["path"] == "/srv/ds"
+
+    # a healthy yaml is left alone
+    assert deployment_worker._ensure_usable_yaml(
+        client, cfg, "/srv/ds/data.yaml", "/srv/ds", lambda p: True
+    ) == "/srv/ds/data.yaml"
