@@ -752,20 +752,28 @@ async def _batch_autolabel_job(job_id: str, project_id: str, image_ids: List[str
     processed = 0
     failed = 0
     labeled = 0
-    source_counts = {"model": 0, "gemini": 0}
+    skipped = 0
+    source_counts = {"model": 0, "gemini": 0, "model+gemini": 0, "model_no_fallback": 0}
     await db.batch_jobs.update_one({"id": job_id}, {"$set": {"status": "processing", "total": total}})
-
-    project = await db.projects.find_one({"id": project_id})
 
     for img_id in image_ids:
         try:
             img = await db.images.find_one({"id": img_id})
             if not img:
                 failed += 1
+                processed += 1
                 continue
             data, _ = get_object(img["storage_path"])
+            # Re-read the project per image so settings changed mid-job
+            # (fallback, class restriction, threshold) apply like single-image labeling.
+            project = await db.projects.find_one({"id": project_id})
+            await db.batch_jobs.update_one({"id": job_id}, {"$set": {"current": {
+                "image_id": img_id, "storage_path": img["storage_path"], "boxes": [], "source": None, "analyzing": True,
+            }}})
             boxes, source = await _auto_label_router(project_id, data, project=project)
             source_counts[source] = source_counts.get(source, 0) + 1
+            if source == "model_no_fallback" and not boxes:
+                skipped += 1
             if boxes:
                 existing = img.get("annotations", [])
                 await db.images.update_one(
@@ -773,14 +781,14 @@ async def _batch_autolabel_job(job_id: str, project_id: str, image_ids: List[str
                     {"$set": {"annotations": existing + boxes, "annotated": True}},
                 )
                 # Merge class labels
-                p = await db.projects.find_one({"id": project_id})
-                classes = set(p.get("classes", []))
-                for b in boxes:
-                    classes.add(b["label"])
-                await db.projects.update_one({"id": project_id}, {"$set": {"classes": sorted(list(classes))}})
+                await db.projects.update_one(
+                    {"id": project_id},
+                    {"$addToSet": {"classes": {"$each": sorted({b["label"] for b in boxes})}}},
+                )
                 labeled += 1
             processed += 1
-            await db.batch_jobs.update_one({"id": job_id}, {"$set": {"processed": processed, "labeled": labeled, "failed": failed, "source_counts": source_counts}})
+            await db.batch_jobs.update_one({"id": job_id}, {"$set": {"processed": processed, "labeled": labeled, "failed": failed, "skipped": skipped, "source_counts": source_counts,
+                "current": {"image_id": img_id, "storage_path": img["storage_path"], "boxes": boxes, "source": source, "analyzing": False}}})
         except Exception as e:
             logger.error(f"Batch label failed for {img_id}: {e}")
             failed += 1
@@ -789,6 +797,7 @@ async def _batch_autolabel_job(job_id: str, project_id: str, image_ids: List[str
 
     await db.batch_jobs.update_one({"id": job_id}, {"$set": {
         "status": "completed",
+        "current": None,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }})
 
@@ -809,12 +818,22 @@ async def batch_auto_label(
     if not image_ids:
         raise HTTPException(status_code=400, detail="No matching images to label")
 
+    proj = await db.projects.find_one({"id": pid}) or {}
+    st = proj.get("settings", {}) or {}
+    active = await db.models.find_one({"project_id": pid, "is_active": True, "status": "trained"})
     job_id = str(uuid.uuid4())
     doc = {
         "id": job_id,
         "project_id": pid,
         "user_id": current["id"],
         "type": "auto_label",
+        "skipped": 0,
+        "settings_snapshot": {
+            "model": (active or {}).get("model_arch") or (active or {}).get("name"),
+            "fallback_to_gemini": st.get("fallback_to_gemini", True),
+            "restrict_to_classes": st.get("gemini_restrict_to_classes", False),
+            "confidence_threshold": st.get("confidence_threshold"),
+        },
         "status": "queued",
         "total": len(image_ids),
         "processed": 0,

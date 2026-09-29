@@ -8,6 +8,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
+import { sourceLabel } from "@/lib/autolabel";
 import {
   Save, Sparkles, Trash2, ArrowLeft, ArrowRight, Undo2,
   Square, Hexagon, Slash, Dot, Circle as CircleIcon, Keyboard,
@@ -361,10 +362,7 @@ export default function Annotator() {
       if (data.boxes && data.boxes.length > 0) {
         const detected = data.boxes.map((b) => ({ type: "bbox", ...b }));
         commitBoxes([...boxes, ...detected]);
-        const src = data.source === "model" ? "trained model"
-                  : data.source === "gemini" ? "Gemini"
-                  : data.source === "model+gemini" ? "model + Gemini"
-                  : data.source;
+        const src = sourceLabel(data.source);
         toast.success(`Detected ${detected.length} objects via ${src}`);
       } else {
         toast.info(`No objects detected (source: ${data.source})`);

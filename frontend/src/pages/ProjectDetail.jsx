@@ -4,6 +4,7 @@ import { api, fileUrl } from "@/lib/api";
 import Navbar from "@/components/Navbar";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
+import { sourceLabel } from "@/lib/autolabel";
 import { Upload, Sparkles, ImageIcon, GitBranch, Rocket, CheckCircle2, Trash2, Video, Film, Loader2, XCircle, Clock, Send, UserPlus, Activity as ActivityIcon, Settings, TrendingUp } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
@@ -44,6 +45,7 @@ export default function ProjectDetail() {
   const [assignUserIds, setAssignUserIds] = useState(new Set());
   // Settings dialog
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
   const [settings, setSettings] = useState({ confidence_threshold: 0.4, fallback_to_gemini: true, min_boxes_threshold: 1, show_confidence: true, gemini_restrict_to_classes: false, gemini_allowed_classes: null });
   const [alQueue, setAlQueue] = useState(null);
   const [alLoading, setAlLoading] = useState(false);
@@ -158,11 +160,19 @@ export default function ProjectDetail() {
     } catch { toast.error("Delete failed"); }
   };
 
+  const unlabeledCount = images.filter((i) => !i.annotated).length;
+
+  const openBatchLabel = () => {
+    if (unlabeledCount === 0) return toast.info("All images are already labeled");
+    setBatchOpen(true);
+  };
+
   const startBatchLabel = async () => {
-    const unlabeled = images.filter((i) => !i.annotated).length;
-    if (unlabeled === 0) return toast.info("All images are already labeled");
-    if (!window.confirm(`Auto-label ${unlabeled} unlabeled image${unlabeled > 1 ? "s" : ""} with Gemini? This may take a few minutes.`)) return;
     try {
+      // Persist the settings shown in the dialog so the job uses exactly these.
+      const saved = await api.patch(`/projects/${pid}/settings`, settings);
+      setSettings(saved.data.settings);
+      setBatchOpen(false);
       const { data } = await api.post(`/projects/${pid}/batch-auto-label`, { only_unlabeled: true });
       toast.success(`Batch job started: ${data.total} images queued`);
       setBatchJob(data);
@@ -195,10 +205,10 @@ export default function ProjectDetail() {
           load();
         }
       } catch (err) { console.debug("batch job poll failed", err); }
-    }, 2500);
+    }, 1000);
     return () => clearInterval(iv);
     // eslint-disable-next-line
-  }, [batchJob]);
+  }, [batchJob?.id, batchJob?.status]);
 
   const saveSettings = async () => {
     try {
@@ -824,7 +834,7 @@ export default function ProjectDetail() {
                   <ActivityIcon className="w-4 h-4 mr-2" /> Activity
                 </Button>
                 <Button
-                  onClick={startBatchLabel}
+                  onClick={openBatchLabel}
                   disabled={batchJob && batchJob.status !== "completed"}
                   variant="outline"
                   className="rounded-sm border-[#27272A] bg-transparent hover:bg-[#1C1C1C] hover:border-primary hover:text-primary text-xs uppercase tracking-[0.2em]"
@@ -838,6 +848,61 @@ export default function ProjectDetail() {
               </div>
             </div>
 
+            <Dialog open={batchOpen} onOpenChange={setBatchOpen}>
+              <DialogContent className="bg-[#121212] border-[#27272A] rounded-sm" data-testid="batch-dialog">
+                <DialogHeader>
+                  <DialogTitle className="font-heading tracking-tight">Batch Auto-Label</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 py-2">
+                  <div className="text-sm">
+                    Label {unlabeledCount} unlabeled image{unlabeledCount > 1 ? "s" : ""} using{" "}
+                    <span className="text-primary font-bold">{project?.active_model ? (project.active_model.model_arch || "trained model") : "Gemini"}</span>
+                    {project?.active_model && settings.fallback_to_gemini ? " + Gemini fallback" : ""}.
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <Label className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Confidence threshold</Label>
+                      <span className="text-sm font-bold text-primary">{(settings.confidence_threshold * 100).toFixed(0)}%</span>
+                    </div>
+                    <input
+                      type="range" min="0.05" max="0.95" step="0.05"
+                      value={settings.confidence_threshold}
+                      onChange={(e) => setSettings({ ...settings, confidence_threshold: parseFloat(e.target.value) })}
+                      className="w-full accent-primary"
+                    />
+                  </div>
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <input
+                      type="checkbox" checked={settings.fallback_to_gemini}
+                      onChange={(e) => setSettings({ ...settings, fallback_to_gemini: e.target.checked })}
+                      className="w-4 h-4 accent-primary" data-testid="batch-fallback-toggle"
+                    />
+                    <div className="text-sm">Fall back to Gemini when model is uncertain</div>
+                  </label>
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <input
+                      type="checkbox" checked={settings.gemini_restrict_to_classes}
+                      onChange={(e) => setSettings({ ...settings, gemini_restrict_to_classes: e.target.checked })}
+                      className="w-4 h-4 accent-primary" data-testid="batch-restrict-toggle"
+                    />
+                    <div className="text-sm">Restrict Gemini to this project's classes</div>
+                  </label>
+                  <div className="text-[10px] text-muted-foreground">
+                    More options (min boxes, allowed classes) are in Auto-Label Settings. Changes here are saved to the project.
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button
+                    onClick={startBatchLabel}
+                    className="rounded-sm bg-primary text-black hover:bg-cyan-400 text-xs uppercase tracking-[0.2em] font-bold"
+                    data-testid="batch-start-btn"
+                  >
+                    Start
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
             {batchJob && batchJob.status !== "completed" && (
               <div className="mb-4 panel p-3">
                 <div className="flex items-center justify-between mb-2 text-xs">
@@ -846,7 +911,8 @@ export default function ProjectDetail() {
                     {batchJob.processed}/{batchJob.total} · {batchJob.labeled} labeled · {batchJob.failed} failed
                     {batchJob.source_counts && (
                       <span className="ml-2 text-primary" data-testid="batch-source-counts">
-                        · model {batchJob.source_counts.model || 0} / gemini {batchJob.source_counts.gemini || 0}
+                        · {Object.entries(batchJob.source_counts).filter(([, n]) => n > 0).map(([k, n]) => `${sourceLabel(k)} ${n}`).join(" / ") || "no results yet"}
+                        {batchJob.skipped > 0 && ` · ${batchJob.skipped} skipped`}
                       </span>
                     )}
                   </span>
@@ -858,6 +924,31 @@ export default function ProjectDetail() {
                     data-testid="batch-progress"
                   />
                 </div>
+                {batchJob.current && (
+                  <div className="mt-3 flex justify-center" data-testid="batch-live-preview">
+                    <div className="relative inline-block">
+                      <img
+                        src={fileUrl(batchJob.current.storage_path)}
+                        alt="Currently labeling"
+                        className="max-h-72 max-w-full block"
+                      />
+                      {(batchJob.current.boxes || []).map((b, i) => (
+                        <div
+                          key={i}
+                          className="absolute border-2 border-primary pointer-events-none"
+                          style={{ left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` }}
+                        >
+                          <span className="absolute -top-5 left-0 bg-primary text-black text-[10px] px-1 whitespace-nowrap">{b.label}</span>
+                        </div>
+                      ))}
+                      <div className="absolute bottom-1 left-1 bg-black/70 text-[10px] px-1.5 py-0.5 text-primary">
+                        {batchJob.current.analyzing
+                          ? "Analyzing..."
+                          : `${(batchJob.current.boxes || []).length} boxes · ${sourceLabel(batchJob.current.source)}`}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
