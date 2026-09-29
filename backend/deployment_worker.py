@@ -215,6 +215,114 @@ def _count_remote_files(client, path: str) -> int:
 
 
 def _upload_into_existing(client, tmp_root: str, split_dirs: dict, on_progress=None) -> None:
+    """Merges tmp_root/{split}/{images,labels}/* into a pre-existing remote
+    dataset. Images already present in ANY split dir (matched by file stem -
+    ids are stable uuids) are not re-uploaded and never moved to another split
+    (that would leak an image into both train and val); their label file is
+    refreshed in the split where the image already lives, so edited
+    annotations propagate. New images go to the split they were assigned."""
+    sftp = client.open_sftp()
+    try:
+        existing = {}  # image stem -> split it already lives in
+        for split, (remote_img, _lbl) in split_dirs.items():
+            try:
+                for name in sftp.listdir(remote_img):
+                    existing.setdefault(name.rsplit(".", 1)[0], split)
+            except FileNotFoundError:
+                pass
+
+        total = _count_local_files(tmp_root)
+        done = 0
+        for split in os.listdir(tmp_root):
+            img_local = os.path.join(tmp_root, split, "images")
+            lbl_local = os.path.join(tmp_root, split, "labels")
+            if not os.path.isdir(img_local) or split not in split_dirs:
+                continue
+            for fname in os.listdir(img_local):
+                stem = fname.rsplit(".", 1)[0]
+                target = existing.get(stem, split)
+                remote_img, remote_lbl = split_dirs[target]
+                if stem not in existing:
+                    ssh_helper._ensure_remote_dir(sftp, remote_img)
+                    sftp.put(os.path.join(img_local, fname), f"{remote_img}/{fname}")
+                    existing[stem] = target
+                done += 1
+                lbl_name = f"{stem}.txt"
+                if os.path.exists(os.path.join(lbl_local, lbl_name)):
+                    ssh_helper._ensure_remote_dir(sftp, remote_lbl)
+                    sftp.put(os.path.join(lbl_local, lbl_name), f"{remote_lbl}/{lbl_name}")
+                    done += 1
+                if on_progress:
+                    on_progress(done, total)
+    finally:
+        sftp.close()
+
+
+def _ensure_usable_yaml(client, yaml_cfg: dict, yaml_path: str, yaml_dir: str, path_exists) -> str:
+    """If the yaml's `path:` doesn't point at where its data really is (older
+    uploads wrote a local temp dir there), write a corrected copy beside it
+    (`data.fixed.yaml`) and return that path so training can resolve the
+    splits. The original file is never modified. Returns yaml_path unchanged
+    when no fix is needed."""
+    if not yaml_cfg.get("path"):
+        return yaml_path
+    root = pipeline_logic.effective_yaml_root(yaml_cfg, yaml_dir, path_exists)
+    declared = str(yaml_cfg["path"]).rstrip("/")
+    declared_abs = declared if declared.startswith("/") else posixpath.normpath(posixpath.join(yaml_dir, declared))
+    if root == declared_abs:
+        return yaml_path
+    fixed_path = f"{yaml_dir}/data.fixed.yaml"
+    fixed_cfg = {**yaml_cfg, "path": root}
+    sftp = client.open_sftp()
+    try:
+        with sftp.open(fixed_path, "w") as f:
+            f.write(yaml.safe_dump(fixed_cfg, sort_keys=False))
+    finally:
+        sftp.close()
+    return fixed_path
+
+
+def _make_progress_reporter(sync_db, run_id: str, min_interval: float = 0.5):
+    """Returns report(phase, done, total) that writes run.upload_progress,
+    throttled so a 2000-image upload doesn't hammer Mongo (the final
+    done==total update is always written)."""
+    last = {"t": 0.0}
+
+    def report(phase: str, done: int, total: int) -> None:
+        now = time.monotonic()
+        if done < total and now - last["t"] < min_interval:
+            return
+        last["t"] = now
+        sync_db.pipeline_runs.update_one(
+            {"id": run_id},
+            {"$set": {"upload_progress": {"phase": phase, "done": done, "total": total}}},
+        )
+
+    return report
+
+
+def _count_local_files(root: str) -> int:
+    return sum(len(files) for _r, _d, files in os.walk(root))
+
+
+def _read_remote_text(client, path: str) -> str:
+    exit_code, out, err = ssh_helper.exec_command(client, f"cat {shlex.quote(path)}")
+    if exit_code != 0:
+        raise Exception(f"cat {path} failed (exit {exit_code}): {err.strip()}")
+    return out
+
+
+def _count_remote_files(client, path: str) -> int:
+    exit_code, out, _err = ssh_helper.exec_command(
+        client, f"find {shlex.quote(path)} -maxdepth 1 -type f 2>/dev/null | wc -l"
+    )
+    try:
+        return int(out.strip()) if exit_code == 0 else 0
+    except ValueError:
+        return 0
+
+
+def _upload_into_existing(client, tmp_root: str, split_dirs: dict, on_progress=None) -> None:
     """Uploads tmp_root/{split}/{images,labels}/* into the remote dirs of a
     pre-existing dataset. Never overwrites: a file already present remotely
     is left alone."""
@@ -248,7 +356,7 @@ def _now_iso() -> str:
 def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: int,
                                    req: dict, get_object_fn) -> None:
     """Builds the split dataset dir (M2's layout) and SCPs it to
-    {remote_workdir}/{run_id}/dataset, then populates dataset_export. Mirrors
+    {remote_workdir}/dataset, then populates dataset_export. Mirrors
     _train_yolo_sync's thread-owns-its-own-client shape exactly."""
     sync_client = MongoClient(MONGO_URL)
     sync_db = sync_client[DB_NAME]
@@ -264,7 +372,8 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
                         req.get("pem_key"), req.get("password"))
 
         if dataset_mode == "new":
-            remote_upload_path = f"{req['remote_workdir']}/{run_id}/dataset"
+            workdir = req["remote_workdir"].rstrip("/")
+            remote_upload_path = f"{workdir}/dataset"
             tmp_root, split_info = _build_split_dataset_dir_sync(
                 sync_db, project_id, classes,
                 req["train_pct"], req["valid_pct"], req["test_pct"], get_object_fn,
@@ -282,6 +391,15 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
 
             report("uploading", 0, total_files)
             with ssh_helper.connect(*connect_args) as client:
+                if ssh_helper.remote_exists(client, remote_upload_path):
+                    # A fresh upload must not blend with (or overwrite) what's
+                    # there - move it aside rather than delete it.
+                    backup = f"{remote_upload_path}_old_{run_id[:8]}"
+                    exit_code, _o, err = ssh_helper.exec_command(
+                        client, f"mv {shlex.quote(remote_upload_path)} {shlex.quote(backup)}"
+                    )
+                    if exit_code != 0:
+                        raise Exception(f"could not move existing dataset aside: {err.strip()[-300:]}")
                 ssh_helper.upload_dir(client, tmp_root, remote_upload_path, callback=_on_file)
         else:
             data_yaml_path = req["existing_data_yaml_path"]
@@ -376,10 +494,27 @@ def _prepare_python(client, env_mode: str, venv_path: Optional[str], workdir: st
     if env_mode == "system":
         return "python3"
     if env_mode == "existing":
-        python_bin = f"{venv_path.rstrip('/')}/bin/python"
-        if not ssh_helper.remote_exists(client, python_bin):
-            raise Exception(f"no python interpreter at {python_bin} - check the venv path")
-        return python_bin
+        venv_dir = pipeline_logic.normalize_venv_dir(venv_path)
+        activate = f"{venv_dir}/bin/activate"
+        if not ssh_helper.remote_exists(client, activate):
+            raise Exception(
+                f"no activate script at {activate} - give the venv folder or its bin/activate"
+            )
+        source = f"source {shlex.quote(activate)}"
+
+        def _in_venv(cmd: str):
+            return ssh_helper.exec_command(client, f"bash -c {shlex.quote(f'{source} && {cmd}')}")
+
+        exit_code, _o, err = _in_venv("command -v python")
+        if exit_code != 0:
+            raise Exception(f"activating {activate} failed (exit {exit_code}): {err.strip()[-300:]}")
+        exit_code, _o, _e = _in_venv("python -c 'import ultralytics'")
+        if exit_code != 0:
+            raise Exception(
+                f"ultralytics is not installed in {venv_dir} - install it there "
+                f"or choose 'Create venv'"
+            )
+        return f"{source} && python"
 
     venv_dir = f"{workdir.rstrip('/')}/venv"
     python_bin = f"{venv_dir}/bin/python"
@@ -429,20 +564,31 @@ def _pipeline_training_remote_sync(run_id: str, project_id: str, history_index: 
             raise Exception("no dataset_export.remote_upload_path - run uploading_data first")
         data_yaml_path = dataset_export.get("data_yaml_path") or f"{remote_upload_path}/data.yaml"
 
-        # Branching (the M5 DoD's explicit test target): bootstrap/
-        # fresh_production start from the base checkpoint; merge continues
-        # from whatever's currently live on the remote host.
-        if run.get("run_type") in ("bootstrap", "fresh_production"):
-            checkpoint_path = req["remote_base_model_path"]
+        # An explicit choice from the UI wins: continue from a model already
+        # on the server, or start fresh from a named YOLO model (Ultralytics
+        # downloads it there). Otherwise fall back to the legacy branching:
+        # bootstrap/fresh_production start from the base checkpoint; merge
+        # continues from whatever's currently live on the remote host.
+        if (req.get("start_from_path") or "").strip():
+            checkpoint_path = req["start_from_path"].strip()
+        elif (req.get("yolo_model") or "").strip():
+            checkpoint_path = req["yolo_model"].strip()
+        elif run.get("run_type") in ("bootstrap", "fresh_production"):
+            checkpoint_path = (req.get("remote_base_model_path") or "").strip()
+            if not checkpoint_path:
+                raise Exception("no starting model chosen - pick an existing model or a YOLO model")
         else:
-            checkpoint_path = req["remote_production_model_path"]
+            checkpoint_path = req.get("remote_production_model_path")
             if not checkpoint_path:
                 raise Exception("merge run requires remote_production_model_path")
 
-        project_dir = f"{req['remote_workdir']}/{run_id}/runs"
-        run_name = "train"
-        remote_script_path = f"{req['remote_workdir']}/{run_id}/train_eval.py"
-        metrics_json_path = f"{req['remote_workdir']}/{run_id}/metrics.json"
+        # Everything lives directly under the project dir: dataset/, models/,
+        # venv/, and runs/run_<id>/ (Ultralytics output + script + metrics).
+        workdir = req["remote_workdir"].rstrip("/")
+        project_dir = f"{workdir}/runs"
+        run_name = f"run_{run_id[:8]}"
+        remote_script_path = f"{project_dir}/{run_name}/train_eval.py"
+        metrics_json_path = f"{project_dir}/{run_name}/metrics.json"
 
         params = {
             "checkpoint_path": checkpoint_path,
@@ -492,10 +638,25 @@ def _pipeline_training_remote_sync(run_id: str, project_id: str, history_index: 
             python_bin = _prepare_python(client, env_mode, req.get("venv_path"),
                                           req["remote_workdir"], _on_output)
             ssh_helper.upload_file(client, local_script_path, remote_script_path)
+            if python_bin.startswith("source "):
+                # `source` is a shell builtin (and the SSH login shell may not
+                # be bash), so an activated venv runs under an explicit bash -c.
+                run_cmd = f"bash -c {shlex.quote(f'{python_bin} -u {shlex.quote(remote_script_path)}')}"
+            else:
+                run_cmd = f"{shlex.quote(python_bin)} -u {shlex.quote(remote_script_path)}"
             exit_code, _out, _err = ssh_helper.exec_command_streaming(
-                client, f"{shlex.quote(python_bin)} -u {shlex.quote(remote_script_path)}",
-                on_output=_on_output,
+                client, run_cmd, on_output=_on_output,
             )
+
+            if exit_code == 0:
+                # Keep the trained weights where the model scan looks first.
+                # Best-effort: a failed copy must not fail a finished training.
+                best = f"{project_dir}/{run_name}/weights/best.pt"
+                ssh_helper.exec_command(
+                    client,
+                    f"mkdir -p {shlex.quote(workdir + '/models')} && "
+                    f"cp {shlex.quote(best)} {shlex.quote(f'{workdir}/models/{run_name}_best.pt')}",
+                )
 
         if exit_code != 0:
             raise Exception(f"remote training script exited {exit_code}: {progress['log_tail'][-500:]}")

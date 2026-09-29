@@ -75,6 +75,7 @@ def test_uploading_data_populates_dataset_export_and_clears_busy():
     try:
         mock_client = MagicMock()
         with patch("deployment_worker.ssh_helper.connect") as mock_connect, \
+             patch("deployment_worker.ssh_helper.remote_exists", return_value=False), \
              patch("deployment_worker.ssh_helper.upload_dir") as mock_upload_dir:
             mock_connect.return_value.__enter__.return_value = mock_client
             mock_connect.return_value.__exit__.return_value = False
@@ -90,7 +91,7 @@ def test_uploading_data_populates_dataset_export_and_clears_busy():
             mock_connect.assert_called_once_with("example.com", 22, "u", None, "p")
             mock_upload_dir.assert_called_once()
             assert mock_upload_dir.call_args.args[0] is mock_client
-            assert mock_upload_dir.call_args.args[2] == f"/srv/work/{rid}/dataset"
+            assert mock_upload_dir.call_args.args[2] == "/srv/work/dataset"
 
         run = db.pipeline_runs.find_one({"id": rid})
         assert run["busy"] is False
@@ -100,7 +101,7 @@ def test_uploading_data_populates_dataset_export_and_clears_busy():
         assert de["valid_count"] == 2
         assert de["test_count"] == 1
         assert len(de["test_image_ids"]) == de["test_count"]
-        assert de["remote_upload_path"] == f"/srv/work/{rid}/dataset"
+        assert de["remote_upload_path"] == "/srv/work/dataset"
         assert run["stage_history"][0]["status"] == "succeeded"
     finally:
         _cleanup(db, pid, rid)
@@ -181,9 +182,9 @@ def test_training_remote_streams_progress_and_completes():
 
             mock_upload_file.assert_called_once()
             assert mock_upload_file.call_args.args[0] is mock_client
-            assert mock_upload_file.call_args.args[2] == f"/srv/work/{rid}/train_eval.py"
+            assert mock_upload_file.call_args.args[2] == f"/srv/work/runs/run_{rid[:8]}/train_eval.py"
             mock_exec.assert_called_once()
-            assert mock_exec.call_args.args[1] == f"python3 -u /srv/work/{rid}/train_eval.py"
+            assert mock_exec.call_args.args[1] == f"python3 -u /srv/work/runs/run_{rid[:8]}/train_eval.py"
 
         # Each epoch line triggered its own, distinct Mongo write - not just
         # a single write at the very end.
@@ -193,7 +194,7 @@ def test_training_remote_streams_progress_and_completes():
         assert run["busy"] is False
         assert run["training"]["progress_pct"] == 100
         assert run["training"]["base_checkpoint_ref"] == "/models/base.pt"
-        assert run["training"]["remote_run_dir"] == f"/srv/work/{rid}/runs"
+        assert run["training"]["remote_run_dir"] == "/srv/work/runs"
         assert "3/3" in run["training"]["log_tail"]
         assert run["stage_history"][0]["status"] == "succeeded"
     finally:
@@ -913,17 +914,41 @@ def test_prepare_python_modes():
     client = MagicMock()
     assert deployment_worker._prepare_python(client, "system", None, "/w", lambda _c: None) == "python3"
 
-    with patch.object(ssh_helper, "remote_exists", return_value=True):
-        assert deployment_worker._prepare_python(
-            client, "existing", "/opt/venv/", "/w", lambda _c: None
-        ) == "/opt/venv/bin/python"
 
+def test_prepare_python_existing_sources_activate_for_folder_or_script():
+    seen = []
+
+    def _exec(client, cmd, timeout=None):
+        seen.append(cmd)
+        return 0, "/venvs/training/bin/python\n", ""
+
+    for given in ("/venvs/training", "/venvs/training/bin/activate", "/venvs/training/"):
+        with patch.object(ssh_helper, "remote_exists", return_value=True), \
+             patch.object(ssh_helper, "exec_command", side_effect=_exec):
+            py = deployment_worker._prepare_python(MagicMock(), "existing", given, "/w", lambda _c: None)
+        assert py == "source /venvs/training/bin/activate && python"
+    assert any("import ultralytics" in c and "source /venvs/training/bin/activate" in c for c in seen)
+
+
+def test_prepare_python_existing_errors():
+    client = MagicMock()
     with patch.object(ssh_helper, "remote_exists", return_value=False):
         try:
             deployment_worker._prepare_python(client, "existing", "/nope", "/w", lambda _c: None)
-            assert False, "expected missing venv to raise"
+            assert False, "expected missing activate to raise"
         except Exception as e:
-            assert "/nope/bin/python" in str(e)
+            assert "/nope/bin/activate" in str(e)
+
+    def _no_ultralytics(c, cmd, timeout=None):
+        return (1, "", "") if "import ultralytics" in cmd else (0, "python", "")
+
+    with patch.object(ssh_helper, "remote_exists", return_value=True), \
+         patch.object(ssh_helper, "exec_command", side_effect=_no_ultralytics):
+        try:
+            deployment_worker._prepare_python(client, "existing", "/v", "/w", lambda _c: None)
+            assert False, "expected missing ultralytics to raise"
+        except Exception as e:
+            assert "ultralytics" in str(e)
 
 
 def test_prepare_python_create_makes_venv_and_installs():
@@ -971,3 +996,32 @@ def test_ensure_usable_yaml_writes_fixed_copy_when_path_is_stale():
     assert deployment_worker._ensure_usable_yaml(
         client, cfg, "/srv/ds/data.yaml", "/srv/ds", lambda p: True
     ) == "/srv/ds/data.yaml"
+
+
+def test_upload_into_existing_skips_known_images_refreshes_labels_and_keeps_split(tmp_path):
+    # remote already has img "a" in train; local run assigned it to valid.
+    for split in ("train", "valid"):
+        (tmp_path / split / "images").mkdir(parents=True)
+        (tmp_path / split / "labels").mkdir(parents=True)
+    (tmp_path / "valid" / "images" / "a.jpg").write_bytes(b"x")
+    (tmp_path / "valid" / "labels" / "a.txt").write_text("0 .5 .5 .1 .1")
+    (tmp_path / "train" / "images" / "b.jpg").write_bytes(b"y")
+    (tmp_path / "train" / "labels" / "b.txt").write_text("0 .5 .5 .2 .2")
+
+    remote = {"/d/train/images": ["a.jpg"], "/d/valid/images": []}
+    puts = []
+    sftp = MagicMock()
+    sftp.listdir.side_effect = lambda p: remote[p]
+    sftp.put.side_effect = lambda local, dest: puts.append(dest)
+    client = MagicMock()
+    client.open_sftp.return_value = sftp
+    split_dirs = {
+        "train": ("/d/train/images", "/d/train/labels"),
+        "valid": ("/d/valid/images", "/d/valid/labels"),
+    }
+    with patch.object(ssh_helper, "_ensure_remote_dir"):
+        deployment_worker._upload_into_existing(client, str(tmp_path), split_dirs)
+
+    assert "/d/train/images/a.jpg" not in puts and "/d/valid/images/a.jpg" not in puts  # not re-uploaded
+    assert "/d/train/labels/a.txt" in puts  # label refreshed where the image already lives
+    assert "/d/train/images/b.jpg" in puts and "/d/train/labels/b.txt" in puts

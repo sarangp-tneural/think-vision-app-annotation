@@ -64,7 +64,13 @@ class TrainingRemoteRequest(SSHCredentials):
     schema."""
 
     remote_workdir: str
-    remote_base_model_path: str
+    # Starting model, in priority order: an existing remote checkpoint the user
+    # picked (start_from_path), else a fresh Ultralytics model name downloaded
+    # on the server (yolo_model, e.g. "yolov8n.pt"), else the legacy
+    # remote_base_model_path (bootstrap) / remote_production_model_path (merge).
+    start_from_path: Optional[str] = None
+    yolo_model: Optional[str] = None
+    remote_base_model_path: Optional[str] = None
     remote_production_model_path: Optional[str] = None
     epochs: int = 10
     # "system": bare python3. "existing": {venv_path}/bin/python. "create":

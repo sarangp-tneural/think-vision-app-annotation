@@ -76,6 +76,13 @@ _YAML_FIND_CMD = (
 )
 
 
+_PT_FIND_CMD = (
+    "find {root} -maxdepth 6 -type f -name '*.pt' -not -name 'last.pt' "
+    "-not -path '*/venv/*' -not -path '*/.venv/*' -not -path '*/site-packages/*' "
+    "-printf '%T@ %s %p\\n' 2>/dev/null | sort -rn | head -50"
+)
+
+
 def _describe_dataset_yaml(client, yaml_path: str):
     """Returns a dataset summary dict for a remote yaml, or None if it isn't
     a readable dataset config (needs `names` plus train/val)."""
@@ -124,9 +131,19 @@ def _inspect_remote_sync(req: InspectRemoteRequest) -> dict:
             info = _describe_dataset_yaml(client, path)
             if info:
                 datasets.append(info)
+        _c, out, _e = ssh_helper.exec_command(client, _PT_FIND_CMD.format(root=shlex.quote(workdir)))
+        models = []
+        for line in out.splitlines():
+            parts = line.split(" ", 2)
+            if len(parts) == 3:
+                try:
+                    models.append({"path": parts[2], "size": int(parts[1]), "mtime": float(parts[0])})
+                except ValueError:
+                    pass
         venv_ok = None
         if req.venv_path:
-            venv_ok = ssh_helper.remote_exists(client, f"{req.venv_path.rstrip('/')}/bin/python")
+            venv_dir = pipeline_logic.normalize_venv_dir(req.venv_path)
+            venv_ok = ssh_helper.remote_exists(client, f"{venv_dir}/bin/activate")
     first = datasets[0] if datasets else {}
     return {
         "found": bool(datasets),
@@ -135,6 +152,7 @@ def _inspect_remote_sync(req: InspectRemoteRequest) -> dict:
         "data_yaml_path": first.get("data_yaml_path"),
         "names": first.get("names", []),
         "splits": first.get("splits", {}),
+        "models": models,
         "venv_ok": venv_ok,
     }
 
@@ -251,7 +269,16 @@ def register(s):
             "runs": runs,
             "last_deployed_run_id": (pipeline or {}).get("last_deployed_run_id"),
             "pipeline_id": (pipeline or {}).get("id"),
+            "remote_workdir": (pipeline or {}).get("remote_workdir"),
         }
+
+    async def _remember_workdir(pipeline_id: str, workdir: str) -> None:
+        """Persists the (non-secret) project directory so the UI can prefill it."""
+        workdir = (workdir or "").strip()
+        if workdir:
+            await db.deployment_pipelines.update_one(
+                {"id": pipeline_id}, {"$set": {"remote_workdir": workdir}}
+            )
 
     @router.post("/pipeline/runs/{rid}/inspect_remote")
     async def inspect_remote(rid: str, current=Depends(get_current_user),
@@ -267,6 +294,7 @@ def register(s):
             req = InspectRemoteRequest(**body)
         except ValidationError as e:
             raise HTTPException(status_code=400, detail=f"Invalid inspect_remote request: {e}")
+        await _remember_workdir(run["pipeline_id"], req.remote_workdir)
         try:
             return await asyncio.to_thread(_inspect_remote_sync, req)
         except ssh_helper.SSHConnectionError as e:
@@ -374,6 +402,7 @@ def register(s):
                 await db.pipeline_runs.update_one({"id": rid}, {"$set": {"busy": False}})
                 raise HTTPException(status_code=400, detail=f"Invalid uploading_data request: {e}")
 
+            await _remember_workdir(run["pipeline_id"], req.remote_workdir)
             if abs(req.train_pct + req.valid_pct + req.test_pct - 1.0) > 1e-6:
                 await db.pipeline_runs.update_one({"id": rid}, {"$set": {"busy": False}})
                 raise HTTPException(status_code=400, detail="train_pct + valid_pct + test_pct must sum to 1.0")

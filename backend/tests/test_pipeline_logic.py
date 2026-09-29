@@ -190,3 +190,9 @@ def test_looks_like_dataset_yaml():
     assert pl.looks_like_dataset_yaml({"names": ["a"], "train": "t"})
     assert not pl.looks_like_dataset_yaml({"task": "detect", "data": "x"})  # ultralytics args.yaml
     assert not pl.looks_like_dataset_yaml(None)
+
+
+def test_normalize_venv_dir():
+    for raw in ("/v", "/v/", " /v ", "/v/bin/activate", "/v/bin/python", "/v/bin/python3", "/v/bin"):
+        assert pl.normalize_venv_dir(raw) == "/v", raw
+    assert pl.normalize_venv_dir("") == ""

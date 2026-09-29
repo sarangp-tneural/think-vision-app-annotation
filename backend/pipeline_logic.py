@@ -142,6 +142,16 @@ def looks_like_dataset_yaml(cfg) -> bool:
     return isinstance(cfg, dict) and bool(cfg.get("names")) and bool(cfg.get("train") or cfg.get("val"))
 
 
+def normalize_venv_dir(path: str) -> str:
+    """Users type a venv as its folder, its bin/activate script, or its
+    bin/python - all mean the same venv. Returns the folder."""
+    p = (path or "").strip().rstrip("/")
+    for suffix in ("/bin/activate", "/bin/python3", "/bin/python", "/bin"):
+        if p.endswith(suffix):
+            return p[: -len(suffix)] or "/"
+    return p
+
+
 def names_as_list(yaml_cfg: dict) -> list:
     return _normalize_names(yaml_cfg.get("names"))
 

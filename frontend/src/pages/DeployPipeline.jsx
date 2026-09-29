@@ -113,6 +113,7 @@ export default function DeployPipeline({ pid, project }) {
     remote_base_model_path: "", remote_production_model_path: "",
     train_pct: 0.7, valid_pct: 0.2, test_pct: 0.1, epochs: 10,
     env_mode: "system", venv_path: "",
+    model_choice: "yolo", yolo_model: "yolov8n.pt",
     dataset_mode: "new", existing_data_yaml_path: "", extra_yaml_path: "",
   });
   const [remoteInfo, setRemoteInfo] = useState(null);
@@ -123,6 +124,13 @@ export default function DeployPipeline({ pid, project }) {
   const buildBody = () => {
     const body = { ...fields };
     for (const key of NUMERIC_FIELDS) if (body[key] !== "") body[key] = Number(body[key]);
+    // Only the project directory is asked for: the production model lives in
+    // {workdir}/models by default, and the starting model is either an
+    // existing remote checkpoint or a fresh YOLO model chosen in the UI.
+    const wd = (body.remote_workdir || "").replace(/\/+$/, "");
+    if (!body.remote_production_model_path && wd) body.remote_production_model_path = `${wd}/models/production.pt`;
+    body.start_from_path = body.model_choice !== "yolo" ? body.model_choice : "";
+    body.yolo_model = body.model_choice === "yolo" ? body.yolo_model : "";
     return body;
   };
 
@@ -130,6 +138,10 @@ export default function DeployPipeline({ pid, project }) {
     try {
       const { data } = await api.get(`/projects/${pid}/pipeline/runs`);
       setPipelineData(data);
+      // The project directory is remembered server-side; prefill it once.
+      if (data.remote_workdir) {
+        setFields((f) => (f.remote_workdir ? f : { ...f, remote_workdir: data.remote_workdir }));
+      }
       setSelectedRunId((prev) => {
         if (prev && data.runs.some((r) => r.id === prev)) return prev;
         return data.runs[0]?.id || null;
@@ -217,6 +229,46 @@ export default function DeployPipeline({ pid, project }) {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  // Lists models already on the server without touching dataset choices.
+  const scanModels = async (rid) => {
+    setSubmitting(true);
+    try {
+      const { data } = await api.post(`/pipeline/runs/${rid}/inspect_remote`, buildBody());
+      setRemoteInfo(data);
+      toast.success(`${data.models?.length || 0} model(s) found on the server`);
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Could not scan remote host");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Uploading straight away would copy the whole dataset into a fresh run
+  // folder even when it's already on the server, so look first.
+  const uploadDataset = async (rid) => {
+    if (!remoteInfo) {
+      setSubmitting(true);
+      try {
+        const { data } = await api.post(`/pipeline/runs/${rid}/inspect_remote`, buildBody());
+        setRemoteInfo(data);
+        if (data.found) {
+          setFields((f) => ({ ...f, existing_data_yaml_path: data.datasets[0].data_yaml_path, dataset_mode: "merge" }));
+          toast.info("Existing dataset found on the server — choose how to use it, then press Upload again");
+          return;
+        }
+      } catch (e) {
+        toast.error(e.response?.data?.detail || "Could not inspect remote host");
+        return;
+      } finally {
+        setSubmitting(false);
+      }
+    } else if (remoteInfo.found && fields.dataset_mode === "new"
+      && !window.confirm("A dataset already exists on the server. Upload a fresh full copy anyway?")) {
+      return;
+    }
+    await callStage(rid, "uploading_data");
   };
 
   const deleteRun = async (rid) => {
@@ -332,66 +384,10 @@ export default function DeployPipeline({ pid, project }) {
     </Button>
   );
 
-  const renderStepBody = (run) => {
-    const stage = run.status;
-    const busy = run.busy;
-
-    if (stage === "failed") {
-      const lastStage = run.stage_history?.[run.stage_history.length - 1]?.stage;
-      return (
-        <div className="space-y-4">
-          <div className="p-3 bg-[#050505] border border-destructive/50 flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-destructive shrink-0 mt-0.5" />
-            <div className="text-xs text-destructive">{run.error || "This run failed."}</div>
-          </div>
-          {lastStage && (
-            <>
-              {SSHFields()}
-              <StageButton label={`Retry ${lastStage.replace("_", " ")}`} onClick={() => callStage(run.id, lastStage)} />
-            </>
-          )}
-        </div>
-      );
-    }
-
-    if (busy) {
-      return (
-        <div className="p-3 bg-[#050505] border border-[#27272A] flex items-center gap-3">
-          <Loader2 className="w-5 h-5 text-primary animate-spin shrink-0" />
-          <div className="flex-1">
-            <div className="text-xs uppercase tracking-[0.2em] text-primary">{stage.replace("_", " ")}</div>
-            <div className="text-[10px] text-muted-foreground">{BUSY_STAGE_LABEL[stage] || "Working..."}</div>
-            {stage === "training_remote" && run.training && (
-              <>
-                <ProgressBar pct={run.training.progress_pct} />
-                {run.training.log_tail && (
-                  <pre className="mt-2 max-h-32 overflow-y-auto text-[10px] font-mono text-muted-foreground whitespace-pre-wrap">
-                    {run.training.log_tail}
-                  </pre>
-                )}
-              </>
-            )}
-            {stage === "uploading_data" && run.upload_progress && (
-              <>
-                <div className="mt-2 text-[10px] text-muted-foreground" data-testid={T.uploadProgressText}>
-                  {run.upload_progress.phase === "preparing" ? "Preparing files" : "Uploaded"}{" "}
-                  {run.upload_progress.done} / {run.upload_progress.total}
-                  {run.upload_progress.total > 0 && ` (${Math.round(100 * run.upload_progress.done / run.upload_progress.total)}%)`}
-                </div>
-                <ProgressBar pct={run.upload_progress.total ? Math.round(100 * run.upload_progress.done / run.upload_progress.total) : null} />
-              </>
-            )}
-            {stage !== "training_remote" && !(stage === "uploading_data" && run.upload_progress) && <ProgressBar pct={null} />}
-          </div>
-        </div>
-      );
-    }
-
-    switch (stage) {
-      case "draft":
-        return (
-          <div className="space-y-4">
-            {SSHFields()}
+  // One source of truth per stage: the same inputs are shown when a stage is
+  // about to run and again (unchanged) when it failed and is being retried.
+  const uploadFields = (run) => (
+    <>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
               <FormField label="Remote workdir">
                 <Input value={fields.remote_workdir} onChange={setField("remote_workdir")} className={inputClass} placeholder="/srv/pipeline" data-testid={T.remoteWorkdirInput} />
@@ -455,9 +451,193 @@ export default function DeployPipeline({ pid, project }) {
                 <div className="text-xs text-muted-foreground">No dataset yaml found under the workdir — a fresh dataset will be uploaded.</div>
               )}
             </div>
-            <StageButton label="Upload Dataset" onClick={() => callStage(run.id, "uploading_data")} />
+    </>
+  );
+
+  const classCheckFields = (run) => {
+    const de = run.dataset_export;
+    return (
+      <>
+            <FormField label="Remote data.yaml path (optional — defaults to the uploaded dataset's yaml)">
+              <Input value={fields.remote_data_yaml_path} onChange={setField("remote_data_yaml_path")} className={inputClass} placeholder={de?.data_yaml_path || de?.remote_upload_path ? (de.data_yaml_path || `${de.remote_upload_path}/data.yaml`) : "/srv/data/data.yaml"} data-testid={T.remoteDataYamlInput} />
+            </FormField>
+      </>
+    );
+  };
+
+  const trainingFields = (run) => (
+    <>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <FormField label="Remote project directory">
+                <Input value={fields.remote_workdir} onChange={setField("remote_workdir")} className={inputClass} placeholder="/root/testing_pipeline" data-testid={T.remoteWorkdirInput} />
+              </FormField>
+              <FormField label="Epochs">
+                <Input type="number" value={fields.epochs} onChange={setField("epochs")} className={inputClass} data-testid={T.epochsInput} />
+              </FormField>
+            </div>
+            <FormField label="Starting model">
+              <div className="space-y-3">
+                <Button
+                  variant="outline" size="sm" disabled={submitting || !fields.remote_workdir}
+                  onClick={() => scanModels(run.id)}
+                  className="rounded-sm h-8 text-xs uppercase tracking-[0.2em]"
+                  data-testid={T.scanModelsButton}
+                >
+                  Scan server for existing models
+                </Button>
+                {remoteInfo?.models?.length > 0 && (
+                  <div className="space-y-2" data-testid={T.modelChoiceRadio}>
+                    <div className="text-[10px] text-muted-foreground">Continue training from a model already on the server:</div>
+                    {remoteInfo.models.map((m) => (
+                      <label key={m.path} className="flex items-start gap-2 text-xs cursor-pointer">
+                        <input
+                          type="radio" name="model_choice" className="accent-primary mt-0.5"
+                          checked={fields.model_choice === m.path}
+                          onChange={() => setFields((f) => ({ ...f, model_choice: m.path }))}
+                        />
+                        <span>
+                          <code className="text-primary break-all">{m.path}</code>
+                          <span className="block text-muted-foreground">
+                            {(m.size / 1048576).toFixed(1)} MB · {new Date(m.mtime * 1000).toLocaleString()}
+                          </span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+                {remoteInfo && !remoteInfo.models?.length && (
+                  <div className="text-xs text-muted-foreground">No trained models found under the project directory.</div>
+                )}
+                <label className="flex items-center gap-2 text-xs cursor-pointer">
+                  <input
+                    type="radio" name="model_choice" className="accent-primary"
+                    checked={fields.model_choice === "yolo"}
+                    onChange={() => setFields((f) => ({ ...f, model_choice: "yolo" }))}
+                  />
+                  Start fresh from a YOLO model (downloaded on the server)
+                </label>
+                {fields.model_choice === "yolo" && (
+                  <select
+                    value={fields.yolo_model} onChange={setField("yolo_model")}
+                    className={`${inputClass} px-3 w-full md:w-64`} data-testid={T.yoloModelSelect}
+                  >
+                    {["yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolov8l.pt", "yolov8x.pt",
+                      "yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"].map((n) => (
+                      <option key={n} value={n} className="bg-[#0a0a0a]">{n}</option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            </FormField>
+            <FormField label="Python environment on remote host">
+              <RadioGroup
+                name="env_mode" value={fields.env_mode} testId={T.envModeRadio}
+                onChange={(v) => setFields((f) => ({ ...f, env_mode: v }))}
+                options={[
+                  { value: "system", label: "System python3" },
+                  { value: "existing", label: "Existing venv (source its bin/activate)" },
+                  { value: "create", label: "Create venv in workdir & install dependencies" },
+                ]}
+              />
+            </FormField>
+            {fields.env_mode === "existing" && (
+              <FormField label="Venv folder or activate script (e.g. /venvs/training or /venvs/training/bin/activate)">
+                <Input value={fields.venv_path} onChange={setField("venv_path")} className={inputClass} placeholder="/venvs/training" data-testid={T.venvPathInput} />
+              </FormField>
+            )}
+            {fields.env_mode === "create" && (
+              <div className="text-[10px] text-muted-foreground">
+                Creates <code>{(fields.remote_workdir || "<workdir>").replace(/\/$/, "")}/venv</code> if missing and pip-installs ultralytics (reused on later runs).
+              </div>
+            )}
+    </>
+  );
+
+  const deployFields = () => (
+    <>
+              <FormField label="Remote production model path">
+                <Input value={fields.remote_production_model_path} onChange={setField("remote_production_model_path")} className={inputClass} placeholder={`${(fields.remote_workdir || "<workdir>").replace(/\/+$/, "")}/models/production.pt (default)`} data-testid={T.remoteProductionModelInput} />
+              </FormField>
+    </>
+  );
+
+  const STAGE_FORMS = {
+    uploading_data: { label: "Upload Dataset", ssh: true, fields: uploadFields, action: (rid) => uploadDataset(rid) },
+    class_check: { label: "Check Classes", ssh: true, fields: classCheckFields },
+    training_remote: { label: "Start Training", ssh: true, fields: trainingFields },
+    downloading_model: { label: "Download Model", ssh: true },
+    testing: { label: "Run Tests", ssh: false },
+    deploying: { label: "Deploy", ssh: true, fields: deployFields },
+  };
+
+  const renderStageForm = (stage, run, labelOverride) => {
+    const st = STAGE_FORMS[stage];
+    if (!st) return null;
+    return (
+      <>
+        {st.ssh && SSHFields()}
+        {st.fields && st.fields(run)}
+        <StageButton
+          label={labelOverride || st.label}
+          onClick={() => (st.action ? st.action(run.id) : callStage(run.id, stage))}
+        />
+      </>
+    );
+  };
+
+  const renderStepBody = (run) => {
+    const stage = run.status;
+    const busy = run.busy;
+
+    if (stage === "failed") {
+      const lastStage = run.stage_history?.[run.stage_history.length - 1]?.stage;
+      return (
+        <div className="space-y-4">
+          <div className="p-3 bg-[#050505] border border-destructive/50 flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-destructive shrink-0 mt-0.5" />
+            <div className="text-xs text-destructive">{run.error || "This run failed."}</div>
           </div>
-        );
+          {lastStage && renderStageForm(lastStage, run, `Retry ${lastStage.replace("_", " ")}`)}
+        </div>
+      );
+    }
+
+    if (busy) {
+      return (
+        <div className="p-3 bg-[#050505] border border-[#27272A] flex items-center gap-3">
+          <Loader2 className="w-5 h-5 text-primary animate-spin shrink-0" />
+          <div className="flex-1">
+            <div className="text-xs uppercase tracking-[0.2em] text-primary">{stage.replace("_", " ")}</div>
+            <div className="text-[10px] text-muted-foreground">{BUSY_STAGE_LABEL[stage] || "Working..."}</div>
+            {stage === "training_remote" && run.training && (
+              <>
+                <ProgressBar pct={run.training.progress_pct} />
+                {run.training.log_tail && (
+                  <pre className="mt-2 max-h-32 overflow-y-auto text-[10px] font-mono text-muted-foreground whitespace-pre-wrap">
+                    {run.training.log_tail}
+                  </pre>
+                )}
+              </>
+            )}
+            {stage === "uploading_data" && run.upload_progress && (
+              <>
+                <div className="mt-2 text-[10px] text-muted-foreground" data-testid={T.uploadProgressText}>
+                  {run.upload_progress.phase === "preparing" ? "Preparing files" : "Uploaded"}{" "}
+                  {run.upload_progress.done} / {run.upload_progress.total}
+                  {run.upload_progress.total > 0 && ` (${Math.round(100 * run.upload_progress.done / run.upload_progress.total)}%)`}
+                </div>
+                <ProgressBar pct={run.upload_progress.total ? Math.round(100 * run.upload_progress.done / run.upload_progress.total) : null} />
+              </>
+            )}
+            {stage !== "training_remote" && !(stage === "uploading_data" && run.upload_progress) && <ProgressBar pct={null} />}
+          </div>
+        </div>
+      );
+    }
+
+    switch (stage) {
+      case "draft":
+        return <div className="space-y-4">{renderStageForm("uploading_data", run)}</div>;
 
       case "uploading_data": {
         const de = run.dataset_export;
@@ -469,11 +649,7 @@ export default function DeployPipeline({ pid, project }) {
                 <code className="text-primary">{de.remote_upload_path}</code>
               </div>
             )}
-            {SSHFields()}
-            <FormField label="Remote data.yaml path (optional — defaults to the uploaded dataset's yaml)">
-              <Input value={fields.remote_data_yaml_path} onChange={setField("remote_data_yaml_path")} className={inputClass} placeholder={de?.data_yaml_path || de?.remote_upload_path ? (de.data_yaml_path || `${de.remote_upload_path}/data.yaml`) : "/srv/data/data.yaml"} data-testid={T.remoteDataYamlInput} />
-            </FormField>
-            <StageButton label="Check Classes" onClick={() => callStage(run.id, "class_check")} />
+            {renderStageForm("class_check", run)}
           </div>
         );
       }
@@ -487,42 +663,7 @@ export default function DeployPipeline({ pid, project }) {
                 {cc.match ? "Classes match." : `Class mismatch: ${JSON.stringify(cc.diff)}`}
               </div>
             )}
-            {SSHFields()}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <FormField label="Epochs">
-                <Input type="number" value={fields.epochs} onChange={setField("epochs")} className={inputClass} data-testid={T.epochsInput} />
-              </FormField>
-              <FormField label="Remote base model path (bootstrap/fresh_production)">
-                <Input value={fields.remote_base_model_path} onChange={setField("remote_base_model_path")} className={inputClass} placeholder="/srv/models/base.pt" data-testid={T.remoteBaseModelInput} />
-              </FormField>
-              {run.run_type === "merge" && (
-                <FormField label="Remote production model path (merge)">
-                  <Input value={fields.remote_production_model_path} onChange={setField("remote_production_model_path")} className={inputClass} placeholder="/srv/models/prod.pt" data-testid={T.remoteProductionModelInput} />
-                </FormField>
-              )}
-            </div>
-            <FormField label="Python environment on remote host">
-              <RadioGroup
-                name="env_mode" value={fields.env_mode} testId={T.envModeRadio}
-                onChange={(v) => setFields((f) => ({ ...f, env_mode: v }))}
-                options={[
-                  { value: "system", label: "System python3" },
-                  { value: "existing", label: "Existing venv (path)" },
-                  { value: "create", label: "Create venv in workdir & install dependencies" },
-                ]}
-              />
-            </FormField>
-            {fields.env_mode === "existing" && (
-              <FormField label="Venv path on remote host">
-                <Input value={fields.venv_path} onChange={setField("venv_path")} className={inputClass} placeholder="/home/user/venvs/yolo" data-testid={T.venvPathInput} />
-              </FormField>
-            )}
-            {fields.env_mode === "create" && (
-              <div className="text-[10px] text-muted-foreground">
-                Creates <code>{(fields.remote_workdir || "<workdir>").replace(/\/$/, "")}/venv</code> if missing and pip-installs ultralytics (reused on later runs).
-              </div>
-            )}
-            <StageButton label="Start Training" onClick={() => callStage(run.id, "training_remote")} />
+            {renderStageForm("training_remote", run)}
           </div>
         );
       }
@@ -537,8 +678,7 @@ export default function DeployPipeline({ pid, project }) {
                 <code className="text-primary">{t.remote_run_dir}</code>
               </div>
             )}
-            {SSHFields()}
-            <StageButton label="Download Model" onClick={() => callStage(run.id, "downloading_model")} />
+            {renderStageForm("downloading_model", run)}
           </div>
         );
       }
@@ -552,7 +692,7 @@ export default function DeployPipeline({ pid, project }) {
                 Candidate mAP@50 {((cm.metrics?.mAP50 || 0) * 100).toFixed(1)}%
               </div>
             )}
-            <StageButton label="Run Tests" onClick={() => callStage(run.id, "testing")} />
+            {renderStageForm("testing", run)}
           </div>
         );
       }
@@ -562,11 +702,7 @@ export default function DeployPipeline({ pid, project }) {
           return (
             <div className="space-y-4">
               <div className="text-xs p-3 border border-[#22C55E] text-[#22C55E]">Approved — ready to deploy.</div>
-              {SSHFields()}
-              <FormField label="Remote production model path">
-                <Input value={fields.remote_production_model_path} onChange={setField("remote_production_model_path")} className={inputClass} placeholder="/srv/models/prod.pt" data-testid={T.remoteProductionModelInput} />
-              </FormField>
-              <StageButton label="Deploy" onClick={() => callStage(run.id, "deploying")} />
+              {renderStageForm("deploying", run)}
             </div>
           );
         }
@@ -703,7 +839,7 @@ export default function DeployPipeline({ pid, project }) {
           <div className="text-[10px] uppercase tracking-[0.3em] text-primary">// Rollback to previous backup</div>
           {SSHFields()}
           <FormField label="Remote production model path">
-            <Input value={fields.remote_production_model_path} onChange={setField("remote_production_model_path")} className={inputClass} placeholder="/srv/models/prod.pt" data-testid={T.remoteProductionModelInput} />
+            <Input value={fields.remote_production_model_path} onChange={setField("remote_production_model_path")} className={inputClass} placeholder={`${(fields.remote_workdir || "<workdir>").replace(/\/+$/, "")}/models/production.pt (default)`} data-testid={T.remoteProductionModelInput} />
           </FormField>
           <Button
             onClick={submitRollback}

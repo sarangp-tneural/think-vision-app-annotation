@@ -32,5 +32,8 @@ export const DEPLOY_PIPELINE = {
   uploadProgressText: 'deploy-pipeline-upload-progress-text',
   extraYamlInput: 'deploy-pipeline-extra-yaml-input',
   datasetOption: 'deploy-pipeline-dataset-option',
+  scanModelsButton: 'deploy-pipeline-scan-models-button',
+  modelChoiceRadio: 'deploy-pipeline-model-choice-radio',
+  yoloModelSelect: 'deploy-pipeline-yolo-model-select',
   progressBar: 'deploy-pipeline-progress-bar',
 };
