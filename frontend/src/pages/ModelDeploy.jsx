@@ -409,6 +409,7 @@ export default function ModelDeploy() {
                           <div className="text-xs text-muted-foreground">
                             {m.training_image_count} images
                             {Array.isArray(m.classes) && ` · ${m.classes.length} classes`}
+                            {m.trained_on && ` · Trained on ${m.trained_on === "cuda" ? "GPU" : "CPU"}`}
                             {` · ${new Date(m.created_at).toLocaleString()} · ${m.status}`}
                           </div>
                         </div>

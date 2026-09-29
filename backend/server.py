@@ -1423,6 +1423,8 @@ def _train_yolo_sync(job_id: str, project_id: str, model_arch: str, epochs: int)
     from pymongo import MongoClient
     from ultralytics import YOLO
     from PIL import Image as PILImage
+    import torch
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     sync_client = MongoClient(MONGO_URL)
     sync_db = sync_client[DB_NAME]
 
@@ -1546,7 +1548,7 @@ def _train_yolo_sync(job_id: str, project_id: str, model_arch: str, epochs: int)
             epochs=epochs,
             imgsz=640,
             batch=8,
-            device="cpu",
+            device=device,
             project=tmp_root,
             name="run",
             exist_ok=True,
@@ -1582,6 +1584,7 @@ def _train_yolo_sync(job_id: str, project_id: str, model_arch: str, epochs: int)
         sync_db.models.update_one({"id": job_id}, {"$set": {
             "status": "trained",
             "classes": classes,  # snapshot at train time - inference must decode against this, not the live project list
+            "trained_on": device,
             "weights_path": storage_path,
             "weights_size": len(weights_bytes),
             "final_mAP": metrics["mAP50"],

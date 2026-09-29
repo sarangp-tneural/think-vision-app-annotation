@@ -118,7 +118,10 @@ def diff_classes(local_classes: list, remote_yaml_text: str) -> dict:
 
 _TRAIN_HYPERPARAMS = {
     # Ported verbatim from cicd-pipeline-main/train.py's model.train() call.
-    "patience": 50, "imgsz": 640, "batch": 4, "device": "cpu", "workers": 2,
+    # No "device" key - ultralytics auto-selects CUDA on the remote host if
+    # available, falling back to CPU; hardcoding "cpu" here previously
+    # ignored the remote machine's own GPU regardless of what it had.
+    "patience": 50, "imgsz": 640, "batch": 4, "workers": 2,
     "cache": False, "exist_ok": True, "pretrained": True, "seed": 42,
     "deterministic": True, "amp": False, "optimizer": "SGD", "lr0": 0.01,
     "lrf": 0.01, "momentum": 0.937, "weight_decay": 0.0005, "warmup_epochs": 3,
