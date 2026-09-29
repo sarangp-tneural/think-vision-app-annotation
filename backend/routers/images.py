@@ -1,4 +1,5 @@
 """Image endpoints: upload, list, get, delete, annotations, assign, submit, review, file download."""
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -26,7 +27,7 @@ def register(s):
         img_id = str(uuid.uuid4())
         path = f"{APP_NAME}/projects/{pid}/{img_id}.{ext}"
         try:
-            result = s.put_object(path, content, file.content_type or f"image/{ext}")
+            result = await asyncio.to_thread(s.put_object, path, content, file.content_type or f"image/{ext}")
         except Exception as e:
             logger.error(f"Storage upload failed: {e}")
             raise HTTPException(status_code=500, detail="Storage upload failed")
@@ -54,9 +55,16 @@ def register(s):
             q["assigned_to"] = current["id"]
         elif assignee:
             q["assigned_to"] = assignee
-        imgs = await db.images.find(q, {"_id": 0}).to_list(2000)
-        imgs.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-        return imgs
+        # Annotations are dropped from the list (they can be large); the list
+        # only needs the count. Full annotations come from GET /images/{id}.
+        pipeline = [
+            {"$match": q},
+            {"$sort": {"created_at": -1}},
+            {"$limit": 10000},
+            {"$addFields": {"annotation_count": {"$size": {"$ifNull": ["$annotations", []]}}}},
+            {"$project": {"_id": 0, "annotations": 0}},
+        ]
+        return await db.images.aggregate(pipeline).to_list(10000)
 
     @router.post("/images/{img_id}/assign")
     async def assign_image(img_id: str, payload: s.AssignImageIn, current=Depends(get_current_user)):
@@ -141,11 +149,16 @@ def register(s):
             raise HTTPException(status_code=404, detail="Not found")
         await s._project_access_check(img["project_id"], current["id"])
         try:
-            data, ct = s.get_object(path)
+            data, ct = await asyncio.to_thread(s.get_object, path)
         except Exception as e:
             logger.error(f"Fetch failed: {e}")
             raise HTTPException(status_code=500, detail="File fetch failed")
-        return Response(content=data, media_type=img.get("content_type", ct))
+        # storage paths are UUID-keyed and immutable, so browsers may cache indefinitely
+        return Response(
+            content=data,
+            media_type=img.get("content_type", ct),
+            headers={"Cache-Control": "private, max-age=31536000, immutable"},
+        )
 
     @router.put("/images/{img_id}/annotations")
     async def save_annotations(img_id: str, payload: s.SaveAnnotationsIn, current=Depends(get_current_user)):
@@ -155,7 +168,7 @@ def register(s):
         await s._project_access_check(img["project_id"], current["id"])
         boxes = [b.model_dump() for b in payload.boxes]
         await db.images.update_one({"id": img_id}, {"$set": {"annotations": boxes, "annotated": len(boxes) > 0}})
-        project = await db.projects.find_one({"id": img["project_id"]})
+        project = await db.projects.find_one({"id": img["project_id"]}, {"classes": 1})
         existing = set(project.get("classes", []))
         new_labels = {b["label"] for b in boxes} - existing
         if new_labels:

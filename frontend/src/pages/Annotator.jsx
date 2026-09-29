@@ -62,38 +62,47 @@ export default function Annotator() {
   const [replyText, setReplyText] = useState("");
   const currentUser = getUser();
 
-  const load = async () => {
+  // Project, image list and team members don't change between images, so they
+  // load once per project; only the image and its comments reload on navigation.
+  const loadProject = async () => {
     try {
-      const [iRes, pRes, listRes] = await Promise.all([
-        api.get(`/images/${imgId}`),
+      const [pRes, listRes] = await Promise.all([
         api.get(`/projects/${pid}`),
         api.get(`/projects/${pid}/images`),
       ]);
-      setImage(iRes.data);
       setProject(pRes.data);
       setImages(listRes.data);
-      const anns = (iRes.data.annotations || []).map((a, i) => ({ type: a.type || "bbox", uid: a.uid || `saved-${i}-${Math.random().toString(36).slice(2, 9)}`, ...a }));
-      setBoxes(anns);
-      setDirty(false);
-      if (pRes.data.classes.length > 0) setActiveLabel(pRes.data.classes[0]);
-      // Load team members if project has a team
+      if (pRes.data.classes.length > 0) setActiveLabel((cur) => cur || pRes.data.classes[0]);
       if (pRes.data.team_id) {
         try {
           const t = await api.get(`/teams/${pRes.data.team_id}`);
           setMembers((t.data.members || []).filter((m) => m.status === "active"));
         } catch (err) { console.debug("team members load failed", err); }
       }
-      // Load comments
-      try {
-        const c = await api.get(`/images/${imgId}/comments`);
-        setComments(c.data);
-      } catch (err) { console.debug("comments load failed", err); }
     } catch (e) {
       toast.error("Failed to load");
       navigate(`/projects/${pid}`);
     }
   };
 
+  const load = async () => {
+    try {
+      const [iRes, cRes] = await Promise.all([
+        api.get(`/images/${imgId}`),
+        api.get(`/images/${imgId}/comments`).catch((err) => { console.debug("comments load failed", err); return null; }),
+      ]);
+      setImage(iRes.data);
+      const anns = (iRes.data.annotations || []).map((a, i) => ({ type: a.type || "bbox", uid: a.uid || `saved-${i}-${Math.random().toString(36).slice(2, 9)}`, ...a }));
+      setBoxes(anns);
+      setDirty(false);
+      if (cRes) setComments(cRes.data);
+    } catch (e) {
+      toast.error("Failed to load");
+      navigate(`/projects/${pid}`);
+    }
+  };
+
+  useEffect(() => { loadProject(); /* eslint-disable-next-line */ }, [pid]);
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [imgId]);
 
   const labelColor = (label) => {

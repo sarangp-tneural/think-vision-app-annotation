@@ -424,20 +424,25 @@ async def _project_out(pid: str):
     p = await db.projects.find_one({"id": pid}, {"_id": 0})
     if not p:
         raise HTTPException(status_code=404, detail="Project not found")
-    image_count = await db.images.count_documents({"project_id": pid})
-    annotated_count = await db.images.count_documents({"project_id": pid, "annotated": True})
-    team_name = ""
-    if p.get("team_id"):
-        t = await db.teams.find_one({"id": p["team_id"]}, {"_id": 0})
-        if t:
-            team_name = t["name"]
-    settings = p.get("settings", {})
-    # Same lookup _auto_label_router uses to pick a provider - kept identical
-    # so this field can never disagree with what auto-label actually does.
-    active_model = await db.models.find_one(
-        {"project_id": pid, "is_active": True, "status": "trained"},
-        {"_id": 0, "id": 1, "model_arch": 1, "type": 1, "final_mAP": 1, "activated_at": 1},
+    async def _team_name():
+        if not p.get("team_id"):
+            return ""
+        t = await db.teams.find_one({"id": p["team_id"]}, {"_id": 0, "name": 1})
+        return t["name"] if t else ""
+
+    # Independent lookups run concurrently instead of sequentially.
+    image_count, annotated_count, team_name, active_model = await asyncio.gather(
+        db.images.count_documents({"project_id": pid}),
+        db.images.count_documents({"project_id": pid, "annotated": True}),
+        _team_name(),
+        # Same lookup _auto_label_router uses to pick a provider - kept identical
+        # so this field can never disagree with what auto-label actually does.
+        db.models.find_one(
+            {"project_id": pid, "is_active": True, "status": "trained"},
+            {"_id": 0, "id": 1, "model_arch": 1, "type": 1, "final_mAP": 1, "activated_at": 1},
+        ),
     )
+    settings = p.get("settings", {})
     return {
         "id": p["id"],
         "name": p["name"],
@@ -734,7 +739,7 @@ async def auto_label(img_id: str, current=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Not found")
     await _project_access_check(img["project_id"], current["id"])
     try:
-        data, ct = get_object(img["storage_path"])
+        data, ct = await asyncio.to_thread(get_object, img["storage_path"])
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Image fetch failed: {e}")
     try:
@@ -763,7 +768,7 @@ async def _batch_autolabel_job(job_id: str, project_id: str, image_ids: List[str
                 failed += 1
                 processed += 1
                 continue
-            data, _ = get_object(img["storage_path"])
+            data, _ = await asyncio.to_thread(get_object, img["storage_path"])
             # Re-read the project per image so settings changed mid-job
             # (fallback, class restriction, threshold) apply like single-image labeling.
             project = await db.projects.find_one({"id": project_id})
@@ -1916,6 +1921,17 @@ async def startup():
         await db.project_assignments.create_index([("project_id", 1), ("user_id", 1)])
         await db.comments.create_index([("image_id", 1), ("created_at", 1)])
         await db.models.create_index([("project_id", 1), ("is_active", 1)])
+        await db.models.create_index([("project_id", 1), ("status", 1)])
+        await db.images.create_index([("id", 1)])
+        await db.images.create_index([("project_id", 1), ("annotated", 1)])
+        await db.users.create_index([("id", 1)])
+        await db.projects.create_index([("id", 1)])
+        await db.teams.create_index([("id", 1)])
+        await db.videos.create_index([("id", 1)])
+        await db.videos.create_index([("project_id", 1)])
+        await db.batch_jobs.create_index([("project_id", 1)])
+        await db.versions.create_index([("project_id", 1)])
+        await db.comments.create_index([("id", 1)])
         logger.info("MongoDB indexes ensured")
     except Exception as e:
         logger.error(f"Index creation failed: {e}")

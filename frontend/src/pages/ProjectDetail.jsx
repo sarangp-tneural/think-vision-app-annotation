@@ -66,13 +66,13 @@ export default function ProjectDetail() {
       // Load team members + project assignments if project has a team
       if (pRes.data.team_id) {
         try {
-          const [t, a] = await Promise.all([
+          const [t, a, teams] = await Promise.all([
             api.get(`/teams/${pRes.data.team_id}`),
             api.get(`/projects/${pid}/assignments`),
+            api.get("/teams"),
           ]);
           setMembers((t.data.members || []).filter((m) => m.status === "active"));
           setAssignments(a.data);
-          const teams = await api.get("/teams");
           const myTeam = teams.data.find((x) => x.id === pRes.data.team_id);
           setMyRole(myTeam ? myTeam.role : null);
         } catch (err) { console.debug("team assignments load failed", err); }
@@ -93,7 +93,15 @@ export default function ProjectDetail() {
   useEffect(() => {
     const processing = videos.some((v) => v.status === "processing" || v.status === "queued");
     if (!processing) return;
-    const iv = setInterval(() => load(), 3000);
+    // Poll only video status; reload everything once processing finishes
+    // (new frames show up as images).
+    const iv = setInterval(async () => {
+      try {
+        const { data } = await api.get(`/projects/${pid}/videos`);
+        setVideos(data);
+        if (!data.some((v) => v.status === "processing" || v.status === "queued")) load();
+      } catch (err) { console.debug("video poll failed", err); }
+    }, 3000);
     return () => clearInterval(iv);
     // eslint-disable-next-line
   }, [videos]);
@@ -1044,7 +1052,7 @@ export default function ProjectDetail() {
                         <div className="p-2 border-t border-[#27272A]">
                           <div className="text-[10px] truncate text-muted-foreground">{img.filename}</div>
                           <div className="text-[10px] text-primary mt-1">
-                            {img.annotations?.length || 0} annotation{(img.annotations?.length || 0) !== 1 ? "s" : ""}
+                            {img.annotation_count || 0} annotation{(img.annotation_count || 0) !== 1 ? "s" : ""}
                           </div>
                         </div>
                       </div>
