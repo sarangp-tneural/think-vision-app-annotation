@@ -132,15 +132,21 @@ export default function ProjectDetail() {
     }
   };
 
-  const removeClass = async (label) => {
+  const removeClass = (label) => {
     if (!window.confirm(`Remove class "${label}"?\nExisting annotations with this label are kept but the class won't appear in the picker.`)) return;
-    try {
-      const { data } = await api.delete(`/projects/${pid}/classes/${encodeURIComponent(label)}`);
-      setProject({ ...project, classes: data.classes });
-      toast.success(`Removed class "${label}"`);
-    } catch (e) {
-      toast.error(e.response?.data?.detail || "Failed to remove class");
-    }
+    // Optimistic + background: don't block the chip on the round trip, so
+    // removing several classes in a row (clicking through multiple chips)
+    // feels instant instead of waiting out this backend's per-request
+    // latency on every single one. Functional setProject updates throughout
+    // so rapid clicks on different chips don't stomp each other via a stale
+    // `project` closure.
+    setProject((p) => (p ? { ...p, classes: p.classes.filter((c) => c !== label) } : p));
+    api.delete(`/projects/${pid}/classes/${encodeURIComponent(label)}`)
+      .then(({ data }) => setProject((p) => (p ? { ...p, classes: data.classes } : p)))
+      .catch((e) => {
+        setProject((p) => (p && !p.classes.includes(label) ? { ...p, classes: [...p.classes, label].sort() } : p));
+        toast.error(e.response?.data?.detail || `Failed to remove class "${label}"`);
+      });
   };
 
   const deleteVideo = async (id) => {

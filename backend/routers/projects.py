@@ -130,10 +130,14 @@ def register(s):
 
     @router.delete("/projects/{pid}/classes/{label}")
     async def delete_class(pid: str, label: str, current=Depends(get_current_user)):
-        p = await s._project_access_check(pid, current["id"], roles=["owner", "admin"])
-        classes = [c for c in p.get("classes", []) if c != label]
-        await db.projects.update_one({"id": pid}, {"$set": {"classes": classes}})
-        return {"classes": classes}
+        await s._project_access_check(pid, current["id"], roles=["owner", "admin"])
+        # $pull is atomic per-document - safe when several deletes for
+        # different labels run concurrently (e.g. clicking through multiple
+        # class chips quickly). A read-then-$set-the-whole-list here would
+        # let a slower concurrent request overwrite a faster one's removal.
+        await db.projects.update_one({"id": pid}, {"$pull": {"classes": label}})
+        p = await db.projects.find_one({"id": pid}, {"_id": 0, "classes": 1})
+        return {"classes": p.get("classes", [])}
 
     @router.patch("/projects/{pid}/settings")
     async def update_project_settings(pid: str, payload: s.ProjectSettingsIn, current=Depends(get_current_user)):
