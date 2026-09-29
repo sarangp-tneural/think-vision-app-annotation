@@ -148,6 +148,10 @@ def register(s):
             settings["min_boxes_threshold"] = max(0, int(payload.min_boxes_threshold))
         if payload.show_confidence is not None:
             settings["show_confidence"] = bool(payload.show_confidence)
+        if payload.gemini_restrict_to_classes is not None:
+            settings["gemini_restrict_to_classes"] = bool(payload.gemini_restrict_to_classes)
+        if payload.gemini_allowed_classes is not None:
+            settings["gemini_allowed_classes"] = list(payload.gemini_allowed_classes)
         await db.projects.update_one({"id": pid}, {"$set": {"settings": settings}})
         await s._log_activity(pid, current["id"], "settings_updated", settings)
         return {"settings": settings}

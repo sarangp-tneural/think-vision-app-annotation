@@ -288,6 +288,8 @@ class ProjectSettingsIn(BaseModel):
     fallback_to_gemini: Optional[bool] = None
     min_boxes_threshold: Optional[int] = None  # if model returns fewer than N boxes, fall back
     show_confidence: Optional[bool] = None
+    gemini_restrict_to_classes: Optional[bool] = None
+    gemini_allowed_classes: Optional[List[str]] = None  # None = not customized, use all project classes
 
 class VersionCreate(BaseModel):
     name: str
@@ -451,6 +453,8 @@ async def _project_out(pid: str):
             "fallback_to_gemini": settings.get("fallback_to_gemini", True),
             "min_boxes_threshold": settings.get("min_boxes_threshold", 1),
             "show_confidence": settings.get("show_confidence", True),
+            "gemini_restrict_to_classes": settings.get("gemini_restrict_to_classes", False),
+            "gemini_allowed_classes": settings.get("gemini_allowed_classes"),
         },
         "active_model": active_model,
         "created_at": p["created_at"],
@@ -1708,13 +1712,32 @@ async def _auto_label_router(project_id: str, image_bytes: bytes, project=None) 
     # Gemini
     try:
         b64 = base64.b64encode(image_bytes).decode()
+        restrict_to_classes = settings.get("gemini_restrict_to_classes", False)
+        # None = user hasn't manually curated a subset -> restrict to the
+        # full project class list (old behavior); a list (even empty) means
+        # they picked specific classes via the Settings UI checkboxes.
+        allowed_classes = settings.get("gemini_allowed_classes")
+        effective_classes = allowed_classes if allowed_classes is not None else classes
+        restricting = bool(restrict_to_classes and effective_classes)
+        class_constraint = (
+            f" Only use labels from this exact list, spelled exactly as shown: {effective_classes}. "
+            "Skip any object that doesn't match one of these labels."
+            if restricting else ""
+        )
+        # Case-insensitive lookup back to the list's exact spelling - Gemini
+        # doesn't reliably preserve casing (and the box-building step below
+        # otherwise force-lowercases every label), so without this a
+        # restricted label like "Doctor" comes back as "doctor" and silently
+        # creates a duplicate class instead of matching the intended one.
+        allowed_lookup = {c.lower(): c for c in effective_classes} if restricting else None
         chat = LlmChat(
             api_key=EMERGENT_LLM_KEY,
             session_id=f"autolabel-{uuid.uuid4()}",
             system_message=(
                 "You are a precise computer vision annotator. Detect all distinct objects in the image. "
-                "Return ONLY a JSON array with objects having keys: label (short lowercase noun), "
-                "x, y, w, h (all normalized 0-1, where x,y is top-left corner of bounding box). "
+                f"Return ONLY a JSON array with objects having keys: label ({'from the list below' if restricting else 'short lowercase noun'}), "
+                "x, y, w, h (all normalized 0-1, where x,y is top-left corner of bounding box)."
+                f"{class_constraint} "
                 "No markdown, no prose."
             ),
         ).with_model("gemini", "gemini-2.5-flash")
@@ -1735,9 +1758,16 @@ async def _auto_label_router(project_id: str, image_bytes: bytes, project=None) 
         gemini_boxes = []
         for b in parsed:
             try:
+                raw_label = str(b.get("label", "object")).strip()[:40]
+                if allowed_lookup is not None:
+                    label = allowed_lookup.get(raw_label.lower())
+                    if label is None:
+                        continue  # not in the allowed list - Gemini ignored the constraint, drop it
+                else:
+                    label = raw_label.lower()
                 gemini_boxes.append({
                     "type": "bbox",
-                    "label": str(b.get("label", "object")).lower().strip()[:40],
+                    "label": label,
                     "x": max(0.0, min(1.0, float(b.get("x", 0)))),
                     "y": max(0.0, min(1.0, float(b.get("y", 0)))),
                     "w": max(0.0, min(1.0, float(b.get("w", 0)))),

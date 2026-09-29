@@ -44,7 +44,7 @@ export default function ProjectDetail() {
   const [assignUserIds, setAssignUserIds] = useState(new Set());
   // Settings dialog
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settings, setSettings] = useState({ confidence_threshold: 0.4, fallback_to_gemini: true, min_boxes_threshold: 1, show_confidence: true });
+  const [settings, setSettings] = useState({ confidence_threshold: 0.4, fallback_to_gemini: true, min_boxes_threshold: 1, show_confidence: true, gemini_restrict_to_classes: false, gemini_allowed_classes: null });
   const [alQueue, setAlQueue] = useState(null);
   const [alLoading, setAlLoading] = useState(false);
   const fileInputRef = useRef(null);
@@ -203,6 +203,14 @@ export default function ProjectDetail() {
     } catch (e) {
       toast.error(e.response?.data?.detail || "Save failed");
     }
+  };
+
+  // gemini_allowed_classes: null = not yet customized (treat as "all classes
+  // allowed"); toggling any one class materializes that into a real list.
+  const toggleGeminiClass = (label) => {
+    const current = settings.gemini_allowed_classes ?? project.classes;
+    const next = current.includes(label) ? current.filter((c) => c !== label) : [...current, label];
+    setSettings({ ...settings, gemini_allowed_classes: next });
   };
 
   const upload = async (files) => {
@@ -436,6 +444,46 @@ export default function ProjectDetail() {
                         <div className="text-[10px] text-muted-foreground">Display % badge next to each auto-labeled box</div>
                       </div>
                     </label>
+
+                    <label className="flex items-center gap-3 cursor-pointer" data-testid="gemini-restrict-toggle-wrap">
+                      <input
+                        type="checkbox"
+                        checked={settings.gemini_restrict_to_classes}
+                        onChange={(e) => setSettings({ ...settings, gemini_restrict_to_classes: e.target.checked })}
+                        className="w-4 h-4 accent-primary"
+                        data-testid="gemini-restrict-toggle"
+                      />
+                      <div>
+                        <div className="text-sm">Restrict Gemini to this project's existing classes</div>
+                        <div className="text-[10px] text-muted-foreground">If disabled: Gemini may invent new labels not yet in your class list</div>
+                      </div>
+                    </label>
+
+                    {settings.gemini_restrict_to_classes && (
+                      <div className="pl-7 border-l border-[#27272A]" data-testid="gemini-allowed-classes-list">
+                        <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2">
+                          Allowed classes ({(settings.gemini_allowed_classes ?? project.classes).length}/{project.classes.length})
+                        </div>
+                        {project.classes.length === 0 ? (
+                          <div className="text-xs text-muted-foreground">No classes yet.</div>
+                        ) : (
+                          <div className="flex flex-wrap gap-x-4 gap-y-2 max-h-40 overflow-y-auto">
+                            {project.classes.map((c) => (
+                              <label key={c} className="flex items-center gap-2 cursor-pointer" data-testid={`gemini-class-toggle-wrap-${c}`}>
+                                <input
+                                  type="checkbox"
+                                  checked={(settings.gemini_allowed_classes ?? project.classes).includes(c)}
+                                  onChange={() => toggleGeminiClass(c)}
+                                  className="w-3.5 h-3.5 accent-primary"
+                                  data-testid={`gemini-class-toggle-${c}`}
+                                />
+                                <span className="text-xs">{c}</span>
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <DialogFooter>
                     <Button
