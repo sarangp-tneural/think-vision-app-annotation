@@ -36,5 +36,7 @@ export const DEPLOY_PIPELINE = {
   modelChoiceRadio: 'deploy-pipeline-model-choice-radio',
   yoloModelSelect: 'deploy-pipeline-yolo-model-select',
   trainingSettings: 'deploy-pipeline-training-settings',
+  stepTracker: 'deploy-pipeline-step-tracker',
+  stepTab: 'deploy-pipeline-step-tab',
   progressBar: 'deploy-pipeline-progress-bar',
 };

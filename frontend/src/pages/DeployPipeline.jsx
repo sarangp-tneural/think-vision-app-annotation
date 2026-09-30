@@ -5,7 +5,7 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import {
-  Play, RotateCcw, Trash2, Server, CheckCircle2, XCircle, Loader2, AlertCircle, History,
+  Play, RotateCcw, Trash2, Server, CheckCircle2, XCircle, Loader2, AlertCircle, History, Lock,
 } from "lucide-react";
 import { DEPLOY_PIPELINE as T } from "@/constants/testIds";
 
@@ -37,6 +37,54 @@ const BUSY_STAGE_LABEL = {
   testing: "Running local inference & evaluation...",
   deploying: "Rotating backups and deploying...",
 };
+
+// Ordered pipeline steps shown in the tracker. `stage` is the callable backend
+// stage; "approve" is the human-review step (approve/reject API, not a stage).
+const PIPELINE_STEPS = [
+  { key: "uploading_data", label: "Upload" },
+  { key: "class_check", label: "Class Check" },
+  { key: "training_remote", label: "Train" },
+  { key: "downloading_model", label: "Download" },
+  { key: "testing", label: "Test" },
+  { key: "approve", label: "Approve" },
+  { key: "deploying", label: "Deploy" },
+];
+
+// A step is done only if its latest success is newer than every entry of the
+// earlier steps - re-running step N therefore un-does steps after it.
+function getStepStates(run) {
+  const hist = run.stage_history || [];
+  const lastIdx = (stage, onlyOk) => {
+    for (let i = hist.length - 1; i >= 0; i--) {
+      if (hist[i].stage === stage && (!onlyOk || hist[i].status === "succeeded")) return i;
+    }
+    return -1;
+  };
+  const bootstrap = run.run_type === "bootstrap";
+  const rejected = run.approval?.decision === "rejected" || run.status === "rejected";
+  const done = [];
+  let floor = -1; // history index of the previous step's success
+  PIPELINE_STEPS.forEach((step, i) => {
+    let ok = false;
+    if (step.key === "approve") {
+      ok = done[i - 1] && run.approval?.decision === "approved";
+    } else if (step.key === "deploying") {
+      ok = !bootstrap && done[i - 1] && (lastIdx("deploying", true) > floor || run.status === "completed");
+    } else {
+      const at = lastIdx(step.key, true);
+      ok = at > floor && (i === 0 || done[i - 1]);
+      if (ok) floor = at;
+    }
+    done.push(!!ok);
+  });
+  const na = PIPELINE_STEPS.map((step) => step.key === "deploying" && bootstrap);
+  const usable = PIPELINE_STEPS.map((_, i) => i).filter((i) => !na[i]);
+  let currentIdx = usable.find((i) => !done[i]);
+  if (currentIdx === undefined) currentIdx = usable[usable.length - 1];
+  if (rejected) currentIdx = 5;
+  const unlocked = PIPELINE_STEPS.map((_, i) => !na[i] && i <= currentIdx);
+  return { done, na, unlocked, currentIdx, rejected };
+}
 
 // Simplified, read-only clone of Annotator.jsx's <img> + percent-positioned
 // bbox <div> technique - no pan/zoom/selection/editing, tracks its own
@@ -118,6 +166,8 @@ export default function DeployPipeline({ pid, project }) {
   const [rollbackOpen, setRollbackOpen] = useState(false);
   const [sampleImages, setSampleImages] = useState({});
   const [submitting, setSubmitting] = useState(false);
+  // Step being viewed in the tracker; null = follow the run's current step.
+  const [viewStep, setViewStep] = useState(null);
   // Fresh SSH creds + every stage-specific field live in one object, kept in
   // local component state only - never persisted to localStorage or sent
   // anywhere but the immediate stage-call body, matching the backend's own
@@ -185,6 +235,11 @@ export default function DeployPipeline({ pid, project }) {
   }, [pid]);
 
   const selectedRun = pipelineData.runs.find((r) => r.id === selectedRunId) || null;
+
+  // Snap back to the run's current step when switching runs or when a stage
+  // starts/finishes, so the view auto-advances after each step completes.
+  const historyLen = selectedRun?.stage_history?.length;
+  useEffect(() => { setViewStep(null); }, [selectedRunId, selectedRun?.status, selectedRun?.busy, historyLen]);
 
   // Side-by-side testing view needs each sample's storage_path, which
   // sample_predictions doesn't carry (only image_id) - fetch once per run.
@@ -654,9 +709,86 @@ export default function DeployPipeline({ pid, project }) {
     );
   };
 
+  const renderStepSummary = (key, run) => {
+    switch (key) {
+      case "uploading_data": {
+        const de = run.dataset_export;
+        return de && (
+          <div className="text-xs text-muted-foreground">
+            Uploaded {de.train_count} train · {de.valid_count} valid · {de.test_count} test images to{" "}
+            <code className="text-primary">{de.remote_upload_path}</code>
+          </div>
+        );
+      }
+      case "class_check": {
+        const cc = run.class_check;
+        return cc && (
+          <div className={`text-xs p-3 border ${cc.match ? "border-[#22C55E] text-[#22C55E]" : "border-destructive text-destructive"}`}>
+            {cc.match ? "Classes match." : `Class mismatch: ${JSON.stringify(cc.diff)}`}
+          </div>
+        );
+      }
+      case "training_remote": {
+        const t = run.training;
+        return t && (
+          <div className="text-xs text-muted-foreground">
+            Trained from <code className="text-primary">{t.base_checkpoint_ref}</code> in{" "}
+            <code className="text-primary">{t.remote_run_dir}</code>
+          </div>
+        );
+      }
+      case "downloading_model": {
+        const cm = run.candidate_model;
+        return cm && (
+          <div className="text-xs text-primary font-bold">
+            Candidate mAP@50 {((cm.metrics?.mAP50 || 0) * 100).toFixed(1)}%
+          </div>
+        );
+      }
+      case "testing": {
+        const bc = run.baseline_comparison;
+        return bc && (
+          <div className="text-xs text-muted-foreground">
+            Candidate {((run.candidate_model?.metrics?.mAP50 || 0) * 100).toFixed(1)}% vs baseline{" "}
+            {((bc.baseline_metrics?.mAP50 || 0) * 100).toFixed(1)}% — gate {bc.decision_gate_passed ? "passed" : "failed"}
+          </div>
+        );
+      }
+      case "approve":
+        return run.approval?.decision && (
+          <div className="text-xs p-3 border border-[#22C55E] text-[#22C55E]">
+            {run.approval.decision === "approved" ? "Approved." : `Rejected: ${run.approval.note || "no reason given"}`}
+          </div>
+        );
+      default:
+        return null;
+    }
+  };
+
   const renderStepBody = (run) => {
     const stage = run.status;
     const busy = run.busy;
+    const st = getStepStates(run);
+
+    // Viewing an earlier (or otherwise non-current) unlocked step from the tracker.
+    if (!busy && viewStep !== null && viewStep !== st.currentIdx && st.unlocked[viewStep]) {
+      const step = PIPELINE_STEPS[viewStep];
+      return (
+        <div className="space-y-4">
+          {renderStepSummary(step.key, run)}
+          {STAGE_FORMS[step.key] && (
+            <>
+              {viewStep < st.currentIdx && (
+                <div className="text-[10px] text-muted-foreground">
+                  Re-running {step.label} will invalidate the steps after it.
+                </div>
+              )}
+              {renderStageForm(step.key, run, `Re-run ${step.label}`)}
+            </>
+          )}
+        </div>
+      );
+    }
 
     if (stage === "failed") {
       const lastStage = run.stage_history?.[run.stage_history.length - 1]?.stage;
@@ -709,58 +841,36 @@ export default function DeployPipeline({ pid, project }) {
         return <div className="space-y-4">{renderStageForm("uploading_data", run)}</div>;
 
       case "uploading_data": {
-        const de = run.dataset_export;
         return (
           <div className="space-y-4">
-            {de && (
-              <div className="text-xs text-muted-foreground">
-                Uploaded {de.train_count} train · {de.valid_count} valid · {de.test_count} test images to{" "}
-                <code className="text-primary">{de.remote_upload_path}</code>
-              </div>
-            )}
+            {renderStepSummary("uploading_data", run)}
             {renderStageForm("class_check", run)}
           </div>
         );
       }
 
       case "class_check": {
-        const cc = run.class_check;
         return (
           <div className="space-y-4">
-            {cc && (
-              <div className={`text-xs p-3 border ${cc.match ? "border-[#22C55E] text-[#22C55E]" : "border-destructive text-destructive"}`}>
-                {cc.match ? "Classes match." : `Class mismatch: ${JSON.stringify(cc.diff)}`}
-              </div>
-            )}
+            {renderStepSummary("class_check", run)}
             {renderStageForm("training_remote", run)}
           </div>
         );
       }
 
       case "training_remote": {
-        const t = run.training;
         return (
           <div className="space-y-4">
-            {t && (
-              <div className="text-xs text-muted-foreground">
-                Trained from <code className="text-primary">{t.base_checkpoint_ref}</code> in{" "}
-                <code className="text-primary">{t.remote_run_dir}</code>
-              </div>
-            )}
+            {renderStepSummary("training_remote", run)}
             {renderStageForm("downloading_model", run)}
           </div>
         );
       }
 
       case "downloading_model": {
-        const cm = run.candidate_model;
         return (
           <div className="space-y-4">
-            {cm && (
-              <div className="text-xs text-primary font-bold">
-                Candidate mAP@50 {((cm.metrics?.mAP50 || 0) * 100).toFixed(1)}%
-              </div>
-            )}
+            {renderStepSummary("downloading_model", run)}
             {renderStageForm("testing", run)}
           </div>
         );
@@ -872,6 +982,41 @@ export default function DeployPipeline({ pid, project }) {
     }
   };
 
+  const renderStepTracker = (run) => {
+    const st = getStepStates(run);
+    const active = viewStep ?? st.currentIdx;
+    return (
+      <div className="flex items-center overflow-x-auto pb-2 -mx-1" data-testid={T.stepTracker}>
+        {PIPELINE_STEPS.map((step, i) => {
+          const locked = !st.unlocked[i];
+          const isDone = st.done[i];
+          const rejectedHere = st.rejected && i === 5;
+          const color = rejectedHere ? "text-destructive" : isDone ? "text-[#22C55E]" : locked ? "text-muted-foreground opacity-40" : "text-primary";
+          return (
+            <div key={step.key} className="flex items-center shrink-0">
+              {i > 0 && <div className={`w-6 h-px mx-1 ${st.done[i - 1] ? "bg-[#22C55E]" : "bg-[#27272A]"}`} />}
+              <button
+                type="button"
+                disabled={locked || run.busy}
+                title={st.na[i] ? "Not applicable to bootstrap runs" : locked ? "Complete the previous step first" : step.label}
+                onClick={() => setViewStep(i === st.currentIdx ? null : i)}
+                className={`flex items-center gap-2 px-3 py-2 text-[10px] uppercase tracking-[0.2em] border-b-2 transition-colors ${color} ${
+                  active === i && !locked ? "border-current bg-[#121212]" : "border-transparent"
+                } ${locked ? "cursor-not-allowed" : "hover:bg-[#1C1C1C]"}`}
+                data-testid={`${T.stepTab}-${step.key}`}
+              >
+                <span className="w-5 h-5 rounded-full border border-current flex items-center justify-center text-[9px] font-bold">
+                  {isDone ? <CheckCircle2 className="w-3 h-3" /> : rejectedHere ? <XCircle className="w-3 h-3" /> : locked ? <Lock className="w-2.5 h-2.5" /> : i + 1}
+                </span>
+                <span>{step.label}</span>
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-8">
       <div className="panel p-6 flex flex-wrap items-center justify-between gap-4">
@@ -960,6 +1105,7 @@ export default function DeployPipeline({ pid, project }) {
         <div className="lg:col-span-2">
           {selectedRun ? (
             <div className="panel p-6 space-y-6">
+              {renderStepTracker(selectedRun)}
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-[10px] uppercase tracking-[0.3em] text-primary mb-1">
