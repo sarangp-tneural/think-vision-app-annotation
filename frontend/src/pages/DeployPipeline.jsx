@@ -69,7 +69,6 @@ function getStepStates(run) {
     }
     return -1;
   };
-  const bootstrap = run.run_type === "bootstrap";
   const rejected = run.approval?.decision === "rejected" || run.status === "rejected";
   const done = [];
   let floor = -1; // history index of the previous step's success
@@ -78,7 +77,7 @@ function getStepStates(run) {
     if (step.key === "approve") {
       ok = done[i - 1] && run.approval?.decision === "approved";
     } else if (step.key === "deploying") {
-      ok = !bootstrap && done[i - 1] && (lastIdx("deploying", true) > floor || run.status === "completed");
+      ok = done[i - 1] && (lastIdx("deploying", true) > floor || !!run.deploy);
     } else {
       const at = lastIdx(step.key, true);
       ok = at > floor && (i === 0 || done[i - 1]);
@@ -86,7 +85,7 @@ function getStepStates(run) {
     }
     done.push(!!ok);
   });
-  const na = PIPELINE_STEPS.map((step) => step.key === "deploying" && bootstrap);
+  const na = PIPELINE_STEPS.map(() => false);
   const usable = PIPELINE_STEPS.map((_, i) => i).filter((i) => !na[i]);
   let currentIdx = usable.find((i) => !done[i]);
   if (currentIdx === undefined) currentIdx = usable[usable.length - 1];
@@ -128,6 +127,12 @@ export default function DeployPipeline({ pid, project }) {
   const [models, setModels] = useState(null);
   const [hydratedFor, setHydratedFor] = useState(null);
   const savedFormRef = useRef({ runId: null, json: "" });
+  // Deploy target: its own host/credentials/model/path, separate from the
+  // training host in `fields`. Secrets stay in memory only.
+  const [deploy, setDeploy] = useState({
+    host: "", port: 22, username: "", password: "", pem_key: "", model_id: "", remote_path: "",
+  });
+  const setDeployField = (key) => (e) => setDeploy((d) => ({ ...d, [key]: e.target.value }));
   const [testFile, setTestFile] = useState(null);
   const [testConf, setTestConf] = useState(0.25);
   // Fresh SSH creds + every stage-specific field live in one object, kept in
@@ -210,7 +215,15 @@ export default function DeployPipeline({ pid, project }) {
   useEffect(() => {
     if (!selectedRun || hydratedFor === selectedRun.id) return;
     const { hyperparams, ...saved } = selectedRun.form || {};
-    setFields((f) => ({ ...f, ...saved }));
+    const { deploy_host, deploy_port, deploy_username, deploy_model_path, deploy_model_id, ...trainSaved } = saved;
+    setFields((f) => ({ ...f, ...trainSaved }));
+    // The model to upload defaults to this run's own model, so a saved model
+    // id from another run is not restored.
+    setDeploy((d) => ({
+      ...d,
+      host: deploy_host ?? "", port: deploy_port ?? 22, username: deploy_username ?? "",
+      remote_path: deploy_model_path ?? "", model_id: "",
+    }));
     setHp({ ...HP_DEFAULTS, ...(hyperparams || {}) });
     setHydratedFor(selectedRun.id);
     // eslint-disable-next-line
@@ -222,6 +235,10 @@ export default function DeployPipeline({ pid, project }) {
     const full = buildBody();
     const payload = {};
     for (const k of FORM_KEYS) if (full[k] !== undefined && full[k] !== "") payload[k] = full[k];
+    if (deploy.host) payload.deploy_host = deploy.host;
+    if (deploy.port) payload.deploy_port = Number(deploy.port);
+    if (deploy.username) payload.deploy_username = deploy.username;
+    if (deploy.remote_path) payload.deploy_model_path = deploy.remote_path;
     const json = JSON.stringify(payload);
     const saved = savedFormRef.current;
     if (saved.runId !== selectedRunId) {
@@ -236,7 +253,7 @@ export default function DeployPipeline({ pid, project }) {
     }, 800);
     return () => clearTimeout(t);
     // eslint-disable-next-line
-  }, [fields, hp, hydratedFor, selectedRunId]);
+  }, [fields, hp, deploy, hydratedFor, selectedRunId]);
 
   // Snap back to the run's current step when switching runs or when a stage
   // starts/finishes, so the view auto-advances after each step completes.
@@ -411,10 +428,34 @@ export default function DeployPipeline({ pid, project }) {
     }
   };
 
+  const deployBody = () => ({
+    host: deploy.host, port: Number(deploy.port) || 22, username: deploy.username,
+    password: deploy.password, pem_key: deploy.pem_key,
+    remote_production_model_path: deploy.remote_path,
+    ...(deploy.model_id ? { model_id: deploy.model_id } : {}),
+  });
+
+  const deployRun = async (rid) => {
+    if (!deploy.host || !deploy.username || !deploy.remote_path.trim()) {
+      toast.error("Host, username and the remote path to upload are required");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await api.post(`/pipeline/runs/${rid}/stage/deploying`, deployBody());
+      toast.success("deploying started");
+      await loadPipeline();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Something went wrong");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const submitRollback = async () => {
     setSubmitting(true);
     try {
-      const { data } = await api.post(`/projects/${pid}/pipeline/rollback`, buildBody());
+      const { data } = await api.post(`/projects/${pid}/pipeline/rollback`, deployBody());
       toast.success("Rollback started");
       setRollbackOpen(false);
       await loadPipeline();
@@ -426,30 +467,30 @@ export default function DeployPipeline({ pid, project }) {
     }
   };
 
-  const SSHFields = ({ withPem = true } = {}) => (
+  const SSHFields = ({ withPem = true, vals = fields, set = setField, idSuffix = "" } = {}) => (
     <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
       <FormField label="Host">
-        <Input value={fields.host} onChange={setField("host")} className={inputClass} data-testid={T.hostInput} />
+        <Input value={vals.host} onChange={set("host")} className={inputClass} data-testid={`${T.hostInput}${idSuffix}`} />
       </FormField>
       <FormField label="Port">
-        <Input type="number" value={fields.port} onChange={setField("port")} className={inputClass} data-testid={T.portInput} />
+        <Input type="number" value={vals.port} onChange={set("port")} className={inputClass} data-testid={`${T.portInput}${idSuffix}`} />
       </FormField>
       <FormField label="Username">
-        <Input value={fields.username} onChange={setField("username")} className={inputClass} data-testid={T.usernameInput} />
+        <Input value={vals.username} onChange={set("username")} className={inputClass} data-testid={`${T.usernameInput}${idSuffix}`} />
       </FormField>
       <FormField label="Password / passphrase">
-        <Input type="password" value={fields.password} onChange={setField("password")} className={inputClass} data-testid={T.passwordInput} />
+        <Input type="password" value={vals.password} onChange={set("password")} className={inputClass} data-testid={`${T.passwordInput}${idSuffix}`} />
       </FormField>
       {withPem && (
         <div className="md:col-span-4">
           <FormField label="PEM private key (optional — leave blank to use password auth)">
             <textarea
-              value={fields.pem_key}
-              onChange={setField("pem_key")}
+              value={vals.pem_key}
+              onChange={set("pem_key")}
               placeholder={"-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"}
               rows={6}
               className={pemClass}
-              data-testid={T.pemInput}
+              data-testid={`${T.pemInput}${idSuffix}`}
             />
           </FormField>
         </div>
@@ -694,13 +735,43 @@ export default function DeployPipeline({ pid, project }) {
     </>
   );
 
-  const deployFields = () => (
-    <>
-              <FormField label="Remote production model path">
-                <Input value={fields.remote_production_model_path} onChange={setField("remote_production_model_path")} className={inputClass} placeholder={`${(fields.remote_workdir || "<workdir>").replace(/\/+$/, "")}/models/production.pt (default)`} data-testid={T.remoteProductionModelInput} />
-              </FormField>
-    </>
-  );
+  const deployFields = (run) => {
+    const serverModels = (models || []).filter((m) => m.source === "server" && m.status === "trained");
+    const selected = deploy.model_id || run.candidate_model?.local_model_id || "";
+    return (
+      <div className="space-y-4">
+        <div className="text-xs text-muted-foreground max-w-xl">
+          Upload a trained model to the server that will use it. The current file there is kept as
+          <code className="text-primary"> .bak1</code> / <code className="text-primary">.bak2</code> before it is replaced.
+        </div>
+        {SSHFields({ vals: deploy, set: setDeployField, idSuffix: "-deploy" })}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <FormField label="Model to upload">
+            <select
+              value={selected}
+              onChange={(e) => setDeploy((d) => ({ ...d, model_id: e.target.value }))}
+              className={`${inputClass} w-full px-3 text-sm border`}
+              data-testid={T.deployModelSelect}
+            >
+              {serverModels.length === 0 && <option value="">No server-trained models</option>}
+              {serverModels.map((m) => (
+                <option key={m.id} value={m.id} className="bg-[#121212]">
+                  {m.name || m.model_arch}{m.final_mAP != null ? ` · mAP@50 ${(m.final_mAP * 100).toFixed(1)}%` : ""}
+                  {m.id === run.candidate_model?.local_model_id ? " · this run" : ""}
+                </option>
+              ))}
+            </select>
+          </FormField>
+          <FormField label="Remote path to upload to">
+            <Input
+              value={deploy.remote_path} onChange={setDeployField("remote_path")} className={inputClass}
+              placeholder="/srv/models/production.pt" data-testid={T.deployPathInput}
+            />
+          </FormField>
+        </div>
+      </div>
+    );
+  };
 
   const testFields = (run) => (
     <div className="space-y-4">
@@ -744,7 +815,7 @@ export default function DeployPipeline({ pid, project }) {
       label: "Finish testing → Approve", ssh: false, fields: testFields,
       disabled: (run) => !(run.video_tests || []).some((t) => t.status === "succeeded"),
     },
-    deploying: { label: "Deploy", ssh: true, fields: deployFields },
+    deploying: { label: "Deploy", ssh: false, fields: deployFields, action: (rid) => deployRun(rid) },
   };
 
   const renderStageForm = (stage, run, labelOverride) => {
@@ -802,6 +873,14 @@ export default function DeployPipeline({ pid, project }) {
       case "testing": {
         const n = (run.video_tests || []).filter((t) => t.status === "succeeded").length;
         return n > 0 && <div className="text-xs text-muted-foreground">{n} test video{n > 1 ? "s" : ""} reviewed.</div>;
+      }
+      case "deploying": {
+        const d = run.deploy;
+        return d && !d.rolled_back && (
+          <div className="text-xs text-muted-foreground">
+            Uploaded to <code className="text-primary">{run.form?.deploy_host}:{run.form?.deploy_model_path}</code>
+          </div>
+        );
       }
       case "approve":
         return run.approval?.decision && (
@@ -975,13 +1054,24 @@ export default function DeployPipeline({ pid, project }) {
 
       case "completed": {
         const deploy = run.deploy;
+        // Older runs were marked completed at approval without ever being
+        // deployed - treat those as approved and offer the Deploy form.
+        if (!deploy) {
+          return (
+            <div className="space-y-4">
+              <div className="text-xs p-3 border border-[#22C55E] text-[#22C55E]">Approved — not deployed yet.</div>
+              {renderStageForm("deploying", run)}
+            </div>
+          );
+        }
+        const where = run.form?.deploy_host
+          ? ` to ${run.form.deploy_host}${run.form.deploy_model_path ? `:${run.form.deploy_model_path}` : ""}`
+          : "";
         return (
           <div className="text-xs p-3 border border-[#22C55E] text-[#22C55E]">
-            {run.run_type === "bootstrap"
-              ? "Approved. Activate the model from Model Training when you want to use it for auto labelling."
-              : deploy?.rolled_back
-                ? "Rolled back — previous backup restored."
-                : "Deployed to the remote host and activated locally."}
+            {deploy.rolled_back
+              ? "Rolled back — previous backup restored."
+              : `Deployed${where}. Activate the model from Model Training when you want to use it.`}
           </div>
         );
       }
@@ -1015,7 +1105,7 @@ export default function DeployPipeline({ pid, project }) {
               <button
                 type="button"
                 disabled={locked || run.busy}
-                title={st.na[i] ? "Not applicable to bootstrap runs" : locked ? "Complete the previous step first" : step.label}
+                title={locked ? "Complete the previous step first" : step.label}
                 onClick={() => setViewStep(i === st.currentIdx ? null : i)}
                 className={`flex items-center gap-2 px-3 py-2 text-[10px] uppercase tracking-[0.2em] border-b-2 transition-colors ${color} ${
                   active === i && !locked ? "border-current bg-[#121212]" : "border-transparent"
@@ -1085,9 +1175,9 @@ export default function DeployPipeline({ pid, project }) {
       {rollbackOpen && (
         <div className="panel p-6 space-y-4">
           <div className="text-[10px] uppercase tracking-[0.3em] text-primary">// Rollback to previous backup</div>
-          {SSHFields()}
-          <FormField label="Remote production model path">
-            <Input value={fields.remote_production_model_path} onChange={setField("remote_production_model_path")} className={inputClass} placeholder={`${(fields.remote_workdir || "<workdir>").replace(/\/+$/, "")}/models/production.pt (default)`} data-testid={T.remoteProductionModelInput} />
+          {SSHFields({ vals: deploy, set: setDeployField, idSuffix: "-deploy" })}
+          <FormField label="Remote path of the deployed model">
+            <Input value={deploy.remote_path} onChange={setDeployField("remote_path")} className={inputClass} placeholder="/srv/models/production.pt" data-testid={T.remoteProductionModelInput} />
           </FormField>
           <Button
             onClick={submitRollback}

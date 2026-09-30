@@ -42,5 +42,7 @@ export const DEPLOY_PIPELINE = {
   runVideoTestButton: 'deploy-pipeline-run-video-test-button',
   testVideo: 'deploy-pipeline-test-video',
   activeModel: 'deploy-pipeline-active-model',
+  deployModelSelect: 'deploy-pipeline-deploy-model-select',
+  deployPathInput: 'deploy-pipeline-deploy-path-input',
   progressBar: 'deploy-pipeline-progress-bar',
 };

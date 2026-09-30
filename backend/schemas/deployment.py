@@ -120,6 +120,8 @@ class DeployingRequest(SSHCredentials):
     (no flow before M9)."""
 
     remote_production_model_path: str
+    # Which server-trained model to upload; blank = this run's own model.
+    model_id: Optional[str] = None
 
 
 class RollbackRequest(SSHCredentials):

@@ -65,6 +65,14 @@ FORM_KEYS = {
     "train_pct", "valid_pct", "test_pct", "dataset_mode", "existing_data_yaml_path",
     "extra_yaml_path", "epochs", "env_mode", "venv_path", "model_choice",
     "yolo_model", "start_from_path", "hyperparams",
+    # The deploy target is a separate host from the training one.
+    "deploy_host", "deploy_port", "deploy_username", "deploy_model_path", "deploy_model_id",
+}
+
+# Deploy-stage request fields -> the saved deploy_* form keys.
+_DEPLOY_FORM_MAP = {
+    "host": "deploy_host", "port": "deploy_port", "username": "deploy_username",
+    "remote_production_model_path": "deploy_model_path", "model_id": "deploy_model_id",
 }
 
 
@@ -295,9 +303,13 @@ def register(s):
             "remote_workdir": (pipeline or {}).get("remote_workdir"),
         }
 
-    async def _save_form(run: dict, body: dict) -> dict:
+    async def _save_form(run: dict, body: dict, stage: str = None) -> dict:
         """Stores the run's non-secret form values and mirrors them onto the
-        pipeline so the next run starts pre-filled."""
+        pipeline so the next run starts pre-filled. A deploying-stage body
+        carries the deploy host in host/port/username, which must not
+        overwrite the training host - it is saved under deploy_* instead."""
+        if stage == "deploying":
+            body = {_DEPLOY_FORM_MAP[k]: v for k, v in (body or {}).items() if k in _DEPLOY_FORM_MAP}
         form = _form_from_body(body)
         if not form:
             return {}
@@ -364,11 +376,19 @@ def register(s):
         if stage not in VALID_STAGES:
             raise HTTPException(status_code=400, detail=f"Unknown stage '{stage}'")
 
-        if stage == "deploying" and run.get("run_type") == "bootstrap":
-            raise HTTPException(status_code=400, detail="Bootstrap runs cannot deploy")
-
         if stage == "deploying" and run.get("approval", {}).get("decision") != "approved":
             raise HTTPException(status_code=400, detail="Run must be approved before deploying")
+
+        if stage == "deploying":
+            # Which model to upload: any server-trained model of this project
+            # (default: this run's own downloaded model).
+            model_id = body.get("model_id") or (run.get("candidate_model") or {}).get("local_model_id")
+            model_doc = await db.models.find_one(
+                {"id": model_id, "project_id": run["project_id"], "source": "server"}, {"id": 1}
+            ) if model_id else None
+            if not model_doc:
+                raise HTTPException(status_code=400, detail="Choose a server-trained model of this project to upload")
+            body = {**body, "model_id": model_id}
 
         if stage == "testing" and not any(t.get("status") == "succeeded" for t in run.get("video_tests", [])):
             raise HTTPException(status_code=400, detail="Run at least one video test first")
@@ -382,7 +402,7 @@ def register(s):
                 detail=f"Pipeline busy: run {busy_run['id']} is currently in progress",
             )
 
-        await _save_form(run, body)
+        await _save_form(run, body, stage)
 
         now = datetime.now(timezone.utc).isoformat()
         history_index = len(run.get("stage_history", []))
@@ -514,7 +534,7 @@ def register(s):
             return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
 
         # stage == "deploying" - the only remaining branch, guarded above by
-        # both the bootstrap-block (M0) and the approval-required check.
+        # the approval-required check and the model check.
         try:
             req = DeployingRequest(**body)
         except ValidationError as e:
@@ -626,14 +646,6 @@ def register(s):
             "decided_at": now, "note": body.get("note"),
         }
         update = {"approval": approval, "updated_at": now}
-
-        if run.get("run_type") == "bootstrap":
-            # stage/deploying is permanently blocked for bootstrap runs (M0's
-            # guard) - approval is the terminal step. The model is NOT
-            # activated here: activation is a manual choice in Model Training.
-            if not (run.get("candidate_model") or {}).get("local_model_id"):
-                raise HTTPException(status_code=400, detail="No candidate_model on run - run downloading_model first")
-            update["status"] = "completed"
 
         await db.pipeline_runs.update_one({"id": rid}, {"$set": update})
         await s._log_activity(run["project_id"], current["id"], "pipeline_run_approved", {"run_id": rid})

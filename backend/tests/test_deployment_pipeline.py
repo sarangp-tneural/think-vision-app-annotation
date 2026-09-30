@@ -125,11 +125,12 @@ def test_stage_on_missing_run_404(hdr):
     assert r.status_code == 404
 
 
-def test_bootstrap_run_cannot_deploy(hdr, fresh_project):
+def test_bootstrap_run_deploy_needs_approval(hdr, fresh_project):
     run = _create_run(hdr, fresh_project)
     assert run["run_type"] == "bootstrap"
     r = requests.post(f"{BASE_URL}/pipeline/runs/{run['id']}/stage/deploying", headers=hdr)
     assert r.status_code == 400
+    assert "approved" in r.text.lower()
 
 
 # --- M2: split-export format -------------------------------------------------
@@ -482,7 +483,7 @@ def test_reject_on_wrong_status_rejected(hdr, fresh_project):
     assert r.status_code == 409, r.text
 
 
-def test_bootstrap_approve_completes_without_activating(hdr, fresh_project, db):
+def test_bootstrap_approve_stays_open_for_deploy_without_activating(hdr, fresh_project, db):
     """No SSH involved at all for a bootstrap approval, so this can run live
     without a real remote host. Activation is manual, so approval leaves the model inactive."""
     run = _create_run(hdr, fresh_project)
@@ -492,7 +493,7 @@ def test_bootstrap_approve_completes_without_activating(hdr, fresh_project, db):
     r = requests.post(f"{BASE_URL}/pipeline/runs/{run['id']}/approve", headers=hdr)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["status"] == "completed"
+    assert body["status"] == "awaiting_approval"  # Deploy completes the run
     assert body["approval"]["decision"] == "approved"
 
     model = db.models.find_one({"id": mid})
@@ -587,3 +588,26 @@ def test_run_form_saved_without_secrets_and_copied_to_next_run(hdr, fresh_projec
 
     nxt = _create_run(hdr, fresh_project)
     assert nxt["form"]["host"] == "10.0.0.5"
+
+
+def test_deploy_rejects_model_that_is_not_server_trained(hdr, fresh_project, db):
+    run = _create_run(hdr, fresh_project)
+    _seed_awaiting_approval_run(db, fresh_project, run["id"], run_type="bootstrap")  # seeded model has no source=server
+    assert requests.post(f"{BASE_URL}/pipeline/runs/{run['id']}/approve", headers=hdr).status_code == 200
+
+    r = requests.post(
+        f"{BASE_URL}/pipeline/runs/{run['id']}/stage/deploying", headers=hdr,
+        json={"host": "127.0.0.1", "port": 1, "username": "nobody", "password": "x",
+              "remote_production_model_path": "/srv/models/prod.pt", "model_id": str(uuid.uuid4())},
+    )
+    assert r.status_code == 400, r.text
+
+
+def test_deploy_form_saved_under_deploy_keys_without_secrets(hdr, fresh_project):
+    run = _create_run(hdr, fresh_project)
+    r = requests.put(
+        f"{BASE_URL}/pipeline/runs/{run['id']}/form", headers=hdr,
+        json={"deploy_host": "10.1.1.1", "deploy_model_path": "/srv/prod.pt", "password": "x"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["form"] == {"deploy_host": "10.1.1.1", "deploy_model_path": "/srv/prod.pt"}

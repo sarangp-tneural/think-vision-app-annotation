@@ -980,11 +980,8 @@ def _pipeline_deploying_sync(run_id: str, project_id: str, history_index: int,
     non-idempotent remote file rotation. Order matters and is deliberate -
     each step clears the exact destination the next step's rename needs,
     since plain SFTP rename (unlike a POSIX mv) cannot overwrite an existing
-    destination. Then activates the candidate locally, replicating
-    POST /models/{mid}/activate's exact Mongo writes (routers/training.py) -
-    not an HTTP self-call, since nothing in this codebase's background
-    workers calls its own app's API; _log_activity is intentionally omitted,
-    matching every prior sync worker's same already-accepted gap."""
+    destination. It does not activate the model locally - that stays a manual
+    choice in Model Training."""
     sync_client = MongoClient(MONGO_URL)
     sync_db = sync_client[DB_NAME]
     local_candidate_pt = None
@@ -994,11 +991,14 @@ def _pipeline_deploying_sync(run_id: str, project_id: str, history_index: int,
         if not run:
             raise Exception("pipeline run not found")
 
+        # Upload the model picked in the UI (any server-trained model of the
+        # project); default to this run's own downloaded model.
         candidate = run.get("candidate_model") or {}
-        candidate_weights_path = candidate.get("weights_path")
-        local_model_id = candidate.get("local_model_id")
-        if not candidate_weights_path or not local_model_id:
-            raise Exception("no candidate_model on run - run downloading_model first")
+        local_model_id = req.get("model_id") or candidate.get("local_model_id")
+        model_doc = sync_db.models.find_one({"id": local_model_id, "project_id": project_id}) if local_model_id else None
+        candidate_weights_path = (model_doc or {}).get("weights_path")
+        if not candidate_weights_path:
+            raise Exception("no model to upload - pick a server-trained model")
 
         data, _ct = get_object_fn(candidate_weights_path)
         fd, local_candidate_pt = tempfile.mkstemp(suffix=".pt")
@@ -1022,11 +1022,8 @@ def _pipeline_deploying_sync(run_id: str, project_id: str, history_index: int,
                 deploy_info["current_became_bak1"] = True
             ssh_helper.upload_file(client, local_candidate_pt, prod)
 
-        # Activate locally - see docstring: replicates
-        # POST /models/{mid}/activate's exact writes, doesn't call it.
-        sync_db.models.update_many({"project_id": project_id}, {"$set": {"is_active": False}})
+        # Activation is manual (Model Training) - deploying only uploads.
         finished = _now_iso()
-        sync_db.models.update_one({"id": local_model_id}, {"$set": {"is_active": True, "activated_at": finished}})
 
         sync_db.deployment_pipelines.update_one(
             {"id": run["pipeline_id"]}, {"$set": {"last_deployed_run_id": run_id, "updated_at": finished}},
