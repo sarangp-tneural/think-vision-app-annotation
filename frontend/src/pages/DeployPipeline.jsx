@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { api, fileUrl } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import { api, API, getToken } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -8,8 +8,6 @@ import {
   Play, RotateCcw, Trash2, Server, CheckCircle2, XCircle, Loader2, AlertCircle, History, Lock,
 } from "lucide-react";
 import { DEPLOY_PIPELINE as T } from "@/constants/testIds";
-
-const COLORS = ["#06B6D4", "#D946EF", "#EAB308", "#22C55E", "#EF4444", "#F97316", "#3B82F6"];
 
 // Defaults follow the team's manual fine-tuning recipe (train.py on the server).
 const HP_DEFAULTS = {
@@ -28,13 +26,24 @@ const HP_GROUPS = [
 ];
 const HP_OPTIMIZERS = ["SGD", "Adam", "Adamax", "AdamW", "NAdam", "RAdam", "RMSProp", "auto"];
 
+// Non-secret fields persisted on the run (mirrors FORM_KEYS in
+// backend/routers/deployment.py). password / pem_key never leave the browser
+// except in stage-call bodies.
+const FORM_KEYS = [
+  "host", "port", "username", "remote_workdir", "remote_data_yaml_path",
+  "remote_base_model_path", "remote_production_model_path",
+  "train_pct", "valid_pct", "test_pct", "dataset_mode", "existing_data_yaml_path",
+  "extra_yaml_path", "epochs", "env_mode", "venv_path", "model_choice",
+  "yolo_model", "start_from_path", "hyperparams",
+];
+
 const TERMINAL_STATUSES = ["completed", "rejected"];
 const BUSY_STAGE_LABEL = {
   uploading_data: "Uploading dataset to remote host...",
   class_check: "Checking remote classes...",
   training_remote: "Training on remote host...",
   downloading_model: "Downloading trained model...",
-  testing: "Running local inference & evaluation...",
+  testing: "Running video test...",
   deploying: "Rotating backups and deploying...",
 };
 
@@ -86,57 +95,6 @@ function getStepStates(run) {
   return { done, na, unlocked, currentIdx, rejected };
 }
 
-// Simplified, read-only clone of Annotator.jsx's <img> + percent-positioned
-// bbox <div> technique - no pan/zoom/selection/editing, tracks its own
-// natural image dimensions so percent-based box coordinates land correctly
-// regardless of the image's aspect ratio (same reason Annotator.jsx does).
-function ImageWithBoxes({ storagePath, filename, boxes, groundTruth, labelColor }) {
-  const [dims, setDims] = useState(null);
-  return (
-    <div
-      className="relative border border-[#27272A] bg-[#0a0a0a] overflow-hidden w-full"
-      style={dims ? { aspectRatio: dims.w / dims.h } : { minHeight: 160 }}
-    >
-      <img
-        src={fileUrl(storagePath)}
-        alt={filename}
-        onLoad={(e) => setDims({ w: e.target.naturalWidth, h: e.target.naturalHeight })}
-        className="w-full h-full object-contain pointer-events-none block"
-        draggable={false}
-      />
-      {(groundTruth || []).filter((b) => b.type === "bbox" || b.type === undefined).map((b, i) => (
-        <div
-          key={`gt-${i}`}
-          className="absolute border border-dashed border-white/60 pointer-events-none"
-          style={{
-            left: `${(b.x || 0) * 100}%`, top: `${(b.y || 0) * 100}%`,
-            width: `${(b.w || 0) * 100}%`, height: `${(b.h || 0) * 100}%`,
-          }}
-        />
-      ))}
-      {(boxes || []).map((b, i) => (
-        <div
-          key={i}
-          className="absolute border-2 pointer-events-none"
-          style={{
-            left: `${(b.x || 0) * 100}%`, top: `${(b.y || 0) * 100}%`,
-            width: `${(b.w || 0) * 100}%`, height: `${(b.h || 0) * 100}%`,
-            borderColor: labelColor(b.label),
-          }}
-        >
-          <div
-            className="absolute -top-5 left-0 text-[9px] uppercase tracking-wider px-1 py-0.5 font-bold flex items-center gap-1 whitespace-nowrap"
-            style={{ background: labelColor(b.label), color: "#000" }}
-          >
-            <span>{b.label}</span>
-            {b.confidence != null && <span className="opacity-80">{Math.round(b.confidence * 100)}%</span>}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function ProgressBar({ pct }) {
   return (
     <div className="mt-2 h-1 bg-[#27272A]" data-testid={T.progressBar}>
@@ -164,10 +122,14 @@ export default function DeployPipeline({ pid, project }) {
   const [pipelineData, setPipelineData] = useState({ runs: [], last_deployed_run_id: null, pipeline_id: null });
   const [selectedRunId, setSelectedRunId] = useState(null);
   const [rollbackOpen, setRollbackOpen] = useState(false);
-  const [sampleImages, setSampleImages] = useState({});
   const [submitting, setSubmitting] = useState(false);
   // Step being viewed in the tracker; null = follow the run's current step.
   const [viewStep, setViewStep] = useState(null);
+  const [models, setModels] = useState(null);
+  const [hydratedFor, setHydratedFor] = useState(null);
+  const savedFormRef = useRef({ runId: null, json: "" });
+  const [testFile, setTestFile] = useState(null);
+  const [testConf, setTestConf] = useState(0.25);
   // Fresh SSH creds + every stage-specific field live in one object, kept in
   // local component state only - never persisted to localStorage or sent
   // anywhere but the immediate stage-call body, matching the backend's own
@@ -213,6 +175,9 @@ export default function DeployPipeline({ pid, project }) {
     try {
       const { data } = await api.get(`/projects/${pid}/pipeline/runs`);
       setPipelineData(data);
+      api.get(`/projects/${pid}/models`)
+        .then((r) => setModels(r.data))
+        .catch(() => {});
       // The project directory is remembered server-side; prefill it once.
       if (data.remote_workdir) {
         setFields((f) => (f.remote_workdir ? f : { ...f, remote_workdir: data.remote_workdir }));
@@ -235,33 +200,48 @@ export default function DeployPipeline({ pid, project }) {
   }, [pid]);
 
   const selectedRun = pipelineData.runs.find((r) => r.id === selectedRunId) || null;
+  const runModel = selectedRun?.candidate_model
+    ? (models || []).find((m) => m.id === selectedRun.candidate_model.local_model_id) || null
+    : null;
+
+  // Fill the form from what this run saved in the database (once per run
+  // selection - not on every poll, which would clobber what's being typed).
+  // Secrets stay whatever is in memory.
+  useEffect(() => {
+    if (!selectedRun || hydratedFor === selectedRun.id) return;
+    const { hyperparams, ...saved } = selectedRun.form || {};
+    setFields((f) => ({ ...f, ...saved }));
+    setHp({ ...HP_DEFAULTS, ...(hyperparams || {}) });
+    setHydratedFor(selectedRun.id);
+    // eslint-disable-next-line
+  }, [selectedRun?.id]);
+
+  // Debounced auto-save of the (non-secret) form to the run.
+  useEffect(() => {
+    if (!selectedRunId || hydratedFor !== selectedRunId) return undefined;
+    const full = buildBody();
+    const payload = {};
+    for (const k of FORM_KEYS) if (full[k] !== undefined && full[k] !== "") payload[k] = full[k];
+    const json = JSON.stringify(payload);
+    const saved = savedFormRef.current;
+    if (saved.runId !== selectedRunId) {
+      savedFormRef.current = { runId: selectedRunId, json };
+      return undefined;
+    }
+    if (saved.json === json) return undefined;
+    const t = setTimeout(() => {
+      api.put(`/pipeline/runs/${selectedRunId}/form`, payload)
+        .then(() => { savedFormRef.current = { runId: selectedRunId, json }; })
+        .catch(() => {});
+    }, 800);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line
+  }, [fields, hp, hydratedFor, selectedRunId]);
 
   // Snap back to the run's current step when switching runs or when a stage
   // starts/finishes, so the view auto-advances after each step completes.
   const historyLen = selectedRun?.stage_history?.length;
   useEffect(() => { setViewStep(null); }, [selectedRunId, selectedRun?.status, selectedRun?.busy, historyLen]);
-
-  // Side-by-side testing view needs each sample's storage_path, which
-  // sample_predictions doesn't carry (only image_id) - fetch once per run.
-  useEffect(() => {
-    const ids = (selectedRun?.testing?.sample_predictions || []).map((sp) => sp.image_id);
-    const missing = ids.filter((id) => !sampleImages[id]);
-    if (missing.length === 0) return;
-    Promise.all(missing.map((id) => api.get(`/images/${id}`).then((r) => [id, r.data]).catch(() => [id, null])))
-      .then((pairs) => {
-        setSampleImages((prev) => {
-          const next = { ...prev };
-          for (const [id, doc] of pairs) if (doc) next[id] = doc;
-          return next;
-        });
-      });
-    // eslint-disable-next-line
-  }, [selectedRun?.id, selectedRun?.testing]);
-
-  const labelColor = (label) => {
-    const idx = (project?.classes || []).indexOf(label);
-    return COLORS[(idx >= 0 ? idx : 0) % COLORS.length];
-  };
 
   const startNewRun = async () => {
     setSubmitting(true);
@@ -289,6 +269,43 @@ export default function DeployPipeline({ pid, project }) {
       setSubmitting(false);
     }
   };
+
+  const runVideoTest = async (rid) => {
+    if (!testFile) { toast.error("Choose a video first"); return; }
+    setSubmitting(true);
+    try {
+      const form = new FormData();
+      form.append("file", testFile);
+      form.append("conf", String(Number(testConf) || 0.25));
+      await api.post(`/pipeline/runs/${rid}/test-video`, form);
+      toast.success("Video test started");
+      setTestFile(null);
+      await loadPipeline();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Video test failed to start");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const testVideoUrl = (rid, testId) =>
+    `${API}/pipeline/runs/${rid}/test-video/${testId}?auth=${encodeURIComponent(getToken() || "")}`;
+
+  const renderTestVideos = (run) => (run.video_tests || []).length > 0 && (
+    <div className="space-y-4">
+      {run.video_tests.map((t) => (
+        <div key={t.id} className="space-y-2" data-testid={`${T.testVideo}-${t.id}`}>
+          <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+            {t.input_name} · conf {t.conf}{t.frames ? ` · ${t.frames} frames` : ""} · {t.status}
+          </div>
+          {t.status === "succeeded" && (
+            <video src={testVideoUrl(run.id, t.id)} controls preload="metadata" className="w-full max-h-[420px] bg-black border border-[#27272A]" />
+          )}
+          {t.status === "failed" && <div className="text-xs text-destructive break-words">{t.error}</div>}
+        </div>
+      ))}
+    </div>
+  );
 
   const inspectRemote = async (rid) => {
     setSubmitting(true);
@@ -371,7 +388,7 @@ export default function DeployPipeline({ pid, project }) {
     setSubmitting(true);
     try {
       const { data } = await api.post(`/pipeline/runs/${rid}/approve`);
-      toast.success(data.status === "completed" ? "Approved and activated locally" : "Approved — ready to deploy");
+      toast.success(data.status === "completed" ? "Approved" : "Approved — ready to deploy");
       await loadPipeline();
     } catch (e) {
       toast.error(e.response?.data?.detail || "Approve failed");
@@ -454,10 +471,10 @@ export default function DeployPipeline({ pid, project }) {
     </div>
   );
 
-  const StageButton = ({ label, onClick }) => (
+  const StageButton = ({ label, onClick, disabled }) => (
     <Button
       onClick={onClick}
-      disabled={submitting}
+      disabled={submitting || disabled}
       className="rounded-sm bg-primary text-black hover:bg-cyan-400 h-10 text-xs uppercase tracking-[0.2em] font-bold"
       data-testid={T.stageSubmitButton}
     >
@@ -685,12 +702,48 @@ export default function DeployPipeline({ pid, project }) {
     </>
   );
 
+  const testFields = (run) => (
+    <div className="space-y-4">
+      <div className="text-xs text-muted-foreground max-w-xl">
+        Upload a video to run the downloaded model over every frame. The annotated video plays below so you can judge it.
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="sm:col-span-2">
+          <FormField label="Test video (mp4, mov, webm, avi, mkv · max 200MB)">
+            <input
+              type="file" accept="video/*"
+              onChange={(e) => setTestFile(e.target.files?.[0] || null)}
+              className="block w-full text-xs file:mr-3 file:rounded-sm file:border file:border-[#27272A] file:bg-transparent file:px-3 file:py-2 file:text-xs file:text-foreground"
+              data-testid={T.testVideoInput}
+            />
+          </FormField>
+        </div>
+        <FormField label="Confidence">
+          <Input type="number" min="0.01" max="1" step="0.05" value={testConf} onChange={(e) => setTestConf(e.target.value)} className={inputClass} />
+        </FormField>
+      </div>
+      <Button
+        onClick={() => runVideoTest(run.id)}
+        disabled={submitting || !testFile}
+        variant="outline"
+        className="rounded-sm border-primary text-primary bg-transparent hover:bg-primary/10 h-10 text-xs uppercase tracking-[0.2em] font-bold"
+        data-testid={T.runVideoTestButton}
+      >
+        <Play className="w-4 h-4 mr-2" /> Run video test
+      </Button>
+      {renderTestVideos(run)}
+    </div>
+  );
+
   const STAGE_FORMS = {
     uploading_data: { label: "Upload Dataset", ssh: true, fields: uploadFields, action: (rid) => uploadDataset(rid) },
     class_check: { label: "Check Classes", ssh: true, fields: classCheckFields },
     training_remote: { label: "Start Training", ssh: true, fields: trainingFields },
     downloading_model: { label: "Download Model", ssh: true },
-    testing: { label: "Run Tests", ssh: false },
+    testing: {
+      label: "Finish testing → Approve", ssh: false, fields: testFields,
+      disabled: (run) => !(run.video_tests || []).some((t) => t.status === "succeeded"),
+    },
     deploying: { label: "Deploy", ssh: true, fields: deployFields },
   };
 
@@ -703,6 +756,7 @@ export default function DeployPipeline({ pid, project }) {
         {st.fields && st.fields(run)}
         <StageButton
           label={labelOverride || st.label}
+          disabled={st.disabled ? st.disabled(run) : false}
           onClick={() => (st.action ? st.action(run.id) : callStage(run.id, stage))}
         />
       </>
@@ -746,13 +800,8 @@ export default function DeployPipeline({ pid, project }) {
         );
       }
       case "testing": {
-        const bc = run.baseline_comparison;
-        return bc && (
-          <div className="text-xs text-muted-foreground">
-            Candidate {((run.candidate_model?.metrics?.mAP50 || 0) * 100).toFixed(1)}% vs baseline{" "}
-            {((bc.baseline_metrics?.mAP50 || 0) * 100).toFixed(1)}% — gate {bc.decision_gate_passed ? "passed" : "failed"}
-          </div>
-        );
+        const n = (run.video_tests || []).filter((t) => t.status === "succeeded").length;
+        return n > 0 && <div className="text-xs text-muted-foreground">{n} test video{n > 1 ? "s" : ""} reviewed.</div>;
       }
       case "approve":
         return run.approval?.decision && (
@@ -769,6 +818,7 @@ export default function DeployPipeline({ pid, project }) {
     const stage = run.status;
     const busy = run.busy;
     const st = getStepStates(run);
+    const videoRunning = (run.video_tests || []).some((t) => t.status === "running");
 
     // Viewing an earlier (or otherwise non-current) unlocked step from the tracker.
     if (!busy && viewStep !== null && viewStep !== st.currentIdx && st.unlocked[viewStep]) {
@@ -808,8 +858,8 @@ export default function DeployPipeline({ pid, project }) {
         <div className="p-3 bg-[#050505] border border-[#27272A] flex items-center gap-3">
           <Loader2 className="w-5 h-5 text-primary animate-spin shrink-0" />
           <div className="flex-1">
-            <div className="text-xs uppercase tracking-[0.2em] text-primary">{stage.replace("_", " ")}</div>
-            <div className="text-[10px] text-muted-foreground">{BUSY_STAGE_LABEL[stage] || "Working..."}</div>
+            <div className="text-xs uppercase tracking-[0.2em] text-primary">{videoRunning ? "video test" : stage.replace("_", " ")}</div>
+            <div className="text-[10px] text-muted-foreground">{videoRunning ? BUSY_STAGE_LABEL.testing : (BUSY_STAGE_LABEL[stage] || "Working...")}</div>
             {stage === "training_remote" && run.training && (
               <>
                 <ProgressBar pct={run.training.progress_pct} />
@@ -830,7 +880,17 @@ export default function DeployPipeline({ pid, project }) {
                 <ProgressBar pct={run.upload_progress.total ? Math.round(100 * run.upload_progress.done / run.upload_progress.total) : null} />
               </>
             )}
-            {stage !== "training_remote" && !(stage === "uploading_data" && run.upload_progress) && <ProgressBar pct={null} />}
+            {stage === "testing" || (run.video_tests || []).some((t) => t.status === "running") ? (
+              run.test_progress?.total ? (
+                <>
+                  <div className="mt-2 text-[10px] text-muted-foreground">
+                    Frame {run.test_progress.done} / {run.test_progress.total}
+                  </div>
+                  <ProgressBar pct={Math.round(100 * run.test_progress.done / run.test_progress.total)} />
+                </>
+              ) : <ProgressBar pct={null} />
+            ) : null}
+            {stage !== "training_remote" && stage !== "testing" && !(run.video_tests || []).some((t) => t.status === "running") && !(stage === "uploading_data" && run.upload_progress) && <ProgressBar pct={null} />}
           </div>
         </div>
       );
@@ -885,52 +945,9 @@ export default function DeployPipeline({ pid, project }) {
             </div>
           );
         }
-        const bc = run.baseline_comparison;
-        const samples = run.testing?.sample_predictions || [];
         return (
           <div className="space-y-6">
-            {bc && (
-              <div className="grid grid-cols-3 gap-0 border-l border-t border-[#27272A]">
-                <div className="border-r border-b border-[#27272A] p-4">
-                  <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-1">Candidate</div>
-                  <div className={`font-heading text-2xl font-bold ${bc.decision_gate_passed ? "text-[#22C55E]" : "text-destructive"}`}>
-                    {((run.candidate_model?.metrics?.mAP50 || 0) * 100).toFixed(1)}%
-                  </div>
-                </div>
-                <div className="border-r border-b border-[#27272A] p-4">
-                  <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-1">Baseline</div>
-                  <div className="font-heading text-2xl font-bold">{((bc.baseline_metrics?.mAP50 || 0) * 100).toFixed(1)}%</div>
-                </div>
-                <div className="border-r border-b border-[#27272A] p-4">
-                  <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-1">Gate</div>
-                  <div className={`font-heading text-lg font-bold ${bc.decision_gate_passed ? "text-[#22C55E]" : "text-destructive"}`}>
-                    {bc.decision_gate_passed ? "PASSED" : "FAILED"}
-                  </div>
-                </div>
-              </div>
-            )}
-            {samples.length > 0 && (
-              <div className="space-y-4">
-                <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-                  Sample predictions ({samples.length}) — candidate (left) vs. baseline (right), dashed = ground truth
-                </div>
-                {samples.map((sp) => {
-                  const img = sampleImages[sp.image_id];
-                  return (
-                    <div key={sp.image_id} className="grid grid-cols-2 gap-3">
-                      <ImageWithBoxes
-                        storagePath={img?.storage_path} filename={img?.filename}
-                        boxes={sp.candidate_boxes} groundTruth={sp.ground_truth} labelColor={labelColor}
-                      />
-                      <ImageWithBoxes
-                        storagePath={img?.storage_path} filename={img?.filename}
-                        boxes={sp.baseline_boxes} groundTruth={sp.ground_truth} labelColor={labelColor}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+            {renderTestVideos(run)}
             <div className="grid grid-cols-2 gap-2 max-w-md">
               <Button
                 size="sm"
@@ -961,7 +978,7 @@ export default function DeployPipeline({ pid, project }) {
         return (
           <div className="text-xs p-3 border border-[#22C55E] text-[#22C55E]">
             {run.run_type === "bootstrap"
-              ? "Approved and activated locally for auto-labeling."
+              ? "Approved. Activate the model from Model Training when you want to use it for auto labelling."
               : deploy?.rolled_back
                 ? "Rolled back — previous backup restored."
                 : "Deployed to the remote host and activated locally."}
@@ -1026,6 +1043,23 @@ export default function DeployPipeline({ pid, project }) {
             Upload → train → test → approve → deploy against a remote host over SSH, with one-click rollback.
             Credentials are supplied fresh at each step and never stored.
           </p>
+          <div className="mt-3 text-xs" data-testid={T.activeModel}>
+            <span className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mr-2">Model for this run</span>
+            {runModel ? (
+              <>
+                <span className="text-primary font-bold">{runModel.name || runModel.model_arch || "server model"}</span>
+                <span className="text-muted-foreground">
+                  {" · trained from server"}
+                  {runModel.final_mAP != null && ` · mAP@50 ${(runModel.final_mAP * 100).toFixed(1)}%`}
+                  {runModel.is_active && " · active for auto-labeling"}
+                </span>
+              </>
+            ) : selectedRun?.candidate_model && models !== null ? (
+              <span className="font-bold text-destructive">Deleted <span className="font-normal text-muted-foreground">(run Download again)</span></span>
+            ) : (
+              <span className="text-muted-foreground">No model downloaded for this run yet</span>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-3">
           <Button

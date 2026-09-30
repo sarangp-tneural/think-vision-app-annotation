@@ -38,5 +38,9 @@ export const DEPLOY_PIPELINE = {
   trainingSettings: 'deploy-pipeline-training-settings',
   stepTracker: 'deploy-pipeline-step-tracker',
   stepTab: 'deploy-pipeline-step-tab',
+  testVideoInput: 'deploy-pipeline-test-video-input',
+  runVideoTestButton: 'deploy-pipeline-run-video-test-button',
+  testVideo: 'deploy-pipeline-test-video',
+  activeModel: 'deploy-pipeline-active-model',
   progressBar: 'deploy-pipeline-progress-bar',
 };
