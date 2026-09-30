@@ -571,7 +571,7 @@ export default function Annotator() {
             </Button>
             <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.15em] text-muted-foreground" data-testid="autolabel-provider">
               <span>
-                Using: <strong className="text-primary">{project?.active_model ? project.active_model.model_arch : "Gemini"}</strong>
+                Using: <strong className="text-primary">{project?.active_model ? (project.active_model.name || project.active_model.model_arch || "trained model") : "Gemini"}</strong>
               </span>
               <button
                 onClick={() => navigate(`/projects/${pid}/deploy`)}

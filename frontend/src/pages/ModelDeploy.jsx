@@ -17,6 +17,9 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import DeployPipeline from "@/pages/DeployPipeline";
 import { Server } from "lucide-react";
 
+// Locally trained ("real") and server-trained (deploy pipeline) models share one list.
+const isTrainedModel = (m) => m.type === "real" || m.type === "pipeline_candidate";
+
 export default function ModelDeploy() {
   const { pid } = useParams();
   const [params] = useSearchParams();
@@ -53,7 +56,7 @@ export default function ModelDeploy() {
       setTrainingPlan(tp.data);
       setSysVersions(sv.data);
       if (!selectedVersion && v.data.length > 0) setSelectedVersion(v.data[0].id);
-      const simulated = m.data.filter((x) => x.type !== "real");
+      const simulated = m.data.filter((x) => !isTrainedModel(x));
       if (simulated.length > 0) setSelectedModel(simulated[0]);
     } catch { toast.error("Failed to load"); }
   };
@@ -231,10 +234,10 @@ export default function ModelDeploy() {
           )}
         </div>
 
-        <Tabs defaultValue="real" className="space-y-6">
+        <Tabs defaultValue={["real", "simulated", "pipeline"].includes(params.get("tab")) ? params.get("tab") : "real"} className="space-y-6">
           <TabsList className="bg-transparent border border-[#27272A] rounded-sm p-0 h-auto">
             <TabsTrigger value="real" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-real-training">
-              <Zap className="w-3 h-3 mr-2" /> Real Training
+              <Zap className="w-3 h-3 mr-2" /> Model Training
             </TabsTrigger>
             <TabsTrigger value="simulated" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-simulated">
               Simulated
@@ -357,17 +360,17 @@ export default function ModelDeploy() {
             {/* Real model runs list */}
             <div>
               <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-4">
-                Trained Models ({models.filter((m) => m.type === "real").length})
+                Trained Models ({models.filter(isTrainedModel).length})
               </div>
-              {models.filter((m) => m.type === "real").length === 0 ? (
+              {models.filter(isTrainedModel).length === 0 ? (
                 <div className="border border-dashed border-[#27272A] p-16 text-center">
                   <Zap className="w-10 h-10 text-muted-foreground mx-auto mb-6" strokeWidth={1.5} />
-                  <h3 className="font-heading text-xl mb-2">No real models trained yet</h3>
-                  <p className="text-sm text-muted-foreground">Train your first YOLOv8n on approved annotations.</p>
+                  <h3 className="font-heading text-xl mb-2">No trained models yet</h3>
+                  <p className="text-sm text-muted-foreground">Train your first YOLOv8n on approved annotations, or train on a server from the Deploy Pipeline tab.</p>
                 </div>
               ) : (
                 <div className="border-t border-[#27272A]">
-                  {models.filter((m) => m.type === "real").map((m) => (
+                  {models.filter(isTrainedModel).map((m) => (
                     <div key={m.id} className="border-b border-[#27272A] p-5 flex flex-wrap items-center justify-between gap-4 panel-hover" data-testid={`real-model-${m.id}`}>
                       <div className="flex items-center gap-4">
                         <Cpu className="w-4 h-4 text-primary" />
@@ -383,7 +386,7 @@ export default function ModelDeploy() {
                                     if (e.key === "Enter") saveRename(m.id);
                                     if (e.key === "Escape") setEditingModelId(null);
                                   }}
-                                  placeholder={`${m.model_arch} · ${m.epochs} epochs`}
+                                  placeholder={`${m.model_arch} · ${m.epochs ?? "?"} epochs`}
                                   className="bg-transparent border border-[#27272A] focus:outline-none focus:border-primary rounded-sm px-2 py-0.5 text-sm font-heading"
                                   data-testid={`model-name-input-${m.id}`}
                                 />
@@ -396,7 +399,7 @@ export default function ModelDeploy() {
                               </>
                             ) : (
                               <>
-                                <span data-testid={`model-name-${m.id}`}>{m.name || `${m.model_arch} · ${m.epochs} epochs`}</span>
+                                <span data-testid={`model-name-${m.id}`}>{m.name || `${m.model_arch} · ${m.epochs ?? "?"} epochs`}</span>
                                 <button onClick={() => startRenaming(m)} className="text-muted-foreground hover:text-primary" title="Rename" data-testid={`model-name-edit-${m.id}`}>
                                   <Pencil className="w-3 h-3" />
                                 </button>
@@ -405,11 +408,14 @@ export default function ModelDeploy() {
                             {m.is_active && (
                               <span className="text-[9px] uppercase tracking-[0.2em] px-2 py-0.5 bg-primary text-black font-bold" data-testid={`active-badge-${m.id}`}>Active</span>
                             )}
+                            {m.source === "server" && (
+                              <span className="text-[9px] uppercase tracking-[0.2em] px-2 py-0.5 border border-primary text-primary font-bold" data-testid={`server-badge-${m.id}`}>Trained from server</span>
+                            )}
                           </div>
                           <div className="text-xs text-muted-foreground">
-                            {m.training_image_count} images
+                            {m.training_image_count ?? "?"} images
                             {Array.isArray(m.classes) && ` · ${m.classes.length} classes`}
-                            {m.trained_on && ` · Trained on ${m.trained_on === "cuda" ? "GPU" : "CPU"}`}
+                            {m.trained_on && ` · Trained on ${m.trained_on === "server" ? "server" : m.trained_on === "cuda" ? "GPU" : "CPU"}`}
                             {` · ${new Date(m.created_at).toLocaleString()} · ${m.status}`}
                           </div>
                         </div>
@@ -612,13 +618,13 @@ export default function ModelDeploy() {
         )}
 
         {/* All runs */}
-        {models.filter((m) => m.type !== "real").length > 0 && (
+        {models.filter((m) => !isTrainedModel(m)).length > 0 && (
           <div>
             <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-4">
-              All runs ({models.filter((m) => m.type !== "real").length})
+              All runs ({models.filter((m) => !isTrainedModel(m)).length})
             </div>
             <div className="border-t border-[#27272A]">
-              {models.filter((m) => m.type !== "real").map((m) => (
+              {models.filter((m) => !isTrainedModel(m)).map((m) => (
                 <button
                   key={m.id}
                   onClick={() => setSelectedModel(m)}

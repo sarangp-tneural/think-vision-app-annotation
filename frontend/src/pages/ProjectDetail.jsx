@@ -383,7 +383,7 @@ export default function ProjectDetail() {
             </Button>
             <Button
               variant="outline"
-              onClick={() => navigate(`/projects/${pid}/deploy`)}
+              onClick={() => navigate(`/projects/${pid}/deploy?tab=pipeline`)}
               className="rounded-sm border-[#27272A] bg-transparent hover:bg-[#1C1C1C] hover:border-primary hover:text-primary text-xs uppercase tracking-[0.2em]"
               data-testid="deploy-btn"
             >
