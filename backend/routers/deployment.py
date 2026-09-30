@@ -27,7 +27,8 @@ import yaml
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import Response
 from pydantic import ValidationError
 
 import deployment_worker
@@ -53,6 +54,22 @@ VALID_STAGES = {
     "testing",
     "deploying",
 }
+
+
+# Non-secret form fields saved on the run (and mirrored to the pipeline as the
+# prefill for new runs). password / pem_key are deliberately NOT here - see the
+# SECURITY note in schemas/deployment.py.
+FORM_KEYS = {
+    "host", "port", "username", "remote_workdir", "remote_data_yaml_path",
+    "remote_base_model_path", "remote_production_model_path",
+    "train_pct", "valid_pct", "test_pct", "dataset_mode", "existing_data_yaml_path",
+    "extra_yaml_path", "epochs", "env_mode", "venv_path", "model_choice",
+    "yolo_model", "start_from_path", "hyperparams",
+}
+
+
+def _form_from_body(body: dict) -> dict:
+    return {k: v for k, v in (body or {}).items() if k in FORM_KEYS and v is not None}
 
 
 def _fetch_remote_yaml_sync(req: ClassCheckRequest, yaml_path: str) -> str:
@@ -213,6 +230,8 @@ def register(s):
             "status": "draft",
             "busy": False,
             "stage_history": [],
+            # Pre-filled from the previous run's (non-secret) form values.
+            "form": dict(pipeline.get("last_form") or {}),
             "created_at": now,
             "updated_at": now,
         }
@@ -276,6 +295,29 @@ def register(s):
             "remote_workdir": (pipeline or {}).get("remote_workdir"),
         }
 
+    async def _save_form(run: dict, body: dict) -> dict:
+        """Stores the run's non-secret form values and mirrors them onto the
+        pipeline so the next run starts pre-filled."""
+        form = _form_from_body(body)
+        if not form:
+            return {}
+        await db.pipeline_runs.update_one(
+            {"id": run["id"]}, {"$set": {f"form.{k}": v for k, v in form.items()}}
+        )
+        await db.deployment_pipelines.update_one(
+            {"id": run["pipeline_id"]}, {"$set": {f"last_form.{k}": v for k, v in form.items()}}
+        )
+        return form
+
+    @router.put("/pipeline/runs/{rid}/form")
+    async def save_run_form(rid: str, current=Depends(get_current_user),
+                            body: dict = Body(default_factory=dict)):
+        run = await db.pipeline_runs.find_one({"id": rid})
+        if not run:
+            raise HTTPException(status_code=404, detail="Not found")
+        await s._project_access_check(run["project_id"], current["id"], roles=["owner", "admin"])
+        return {"form": await _save_form(run, body)}
+
     async def _remember_workdir(pipeline_id: str, workdir: str) -> None:
         """Persists the (non-secret) project directory so the UI can prefill it."""
         workdir = (workdir or "").strip()
@@ -298,6 +340,7 @@ def register(s):
             req = InspectRemoteRequest(**body)
         except ValidationError as e:
             raise HTTPException(status_code=400, detail=f"Invalid inspect_remote request: {e}")
+        await _save_form(run, body)
         try:
             result = await asyncio.to_thread(_inspect_remote_sync, req)
             await _remember_workdir(run["pipeline_id"], result["workdir"])
@@ -327,6 +370,9 @@ def register(s):
         if stage == "deploying" and run.get("approval", {}).get("decision") != "approved":
             raise HTTPException(status_code=400, detail="Run must be approved before deploying")
 
+        if stage == "testing" and not any(t.get("status") == "succeeded" for t in run.get("video_tests", [])):
+            raise HTTPException(status_code=400, detail="Run at least one video test first")
+
         busy_run = await db.pipeline_runs.find_one(
             {"pipeline_id": run["pipeline_id"], "busy": True}, {"id": 1}
         )
@@ -335,6 +381,8 @@ def register(s):
                 status_code=409,
                 detail=f"Pipeline busy: run {busy_run['id']} is currently in progress",
             )
+
+        await _save_form(run, body)
 
         now = datetime.now(timezone.utc).isoformat()
         history_index = len(run.get("stage_history", []))
@@ -451,15 +499,18 @@ def register(s):
             return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
 
         if stage == "testing":
-            # No request body needed - unlike every prior real stage, testing
-            # only touches things already local or in object storage.
-            async def _job():
-                await asyncio.to_thread(
-                    deployment_worker._pipeline_testing_sync,
-                    rid, run["project_id"], history_index,
-                    s._yolo_predict_sync, s.get_object, s.send_tester_notification_email, s.APP_URL,
-                )
-            background.add_task(_job)
+            # "Finish testing": the real work is the video tests run through
+            # POST /pipeline/runs/{rid}/test-video; this just closes the step
+            # once at least one succeeded and hands the run to human review.
+            finished = datetime.now(timezone.utc).isoformat()
+            await db.pipeline_runs.update_one(
+                {"id": rid},
+                {"$set": {
+                    "busy": False, "updated_at": finished, "status": "awaiting_approval",
+                    f"stage_history.{history_index}.status": "succeeded",
+                    f"stage_history.{history_index}.finished_at": finished,
+                }},
+            )
             return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
 
         # stage == "deploying" - the only remaining branch, guarded above by
@@ -477,6 +528,87 @@ def register(s):
             )
         background.add_task(_job)
         return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
+
+    @router.post("/pipeline/runs/{rid}/test-video")
+    async def test_video(
+        rid: str,
+        background: BackgroundTasks,
+        file: UploadFile = File(...),
+        conf: float = Form(0.25),
+        current=Depends(get_current_user),
+    ):
+        run = await db.pipeline_runs.find_one({"id": rid})
+        if not run:
+            raise HTTPException(status_code=404, detail="Not found")
+        await s._project_access_check(run["project_id"], current["id"], roles=["owner", "admin"])
+        candidate = run.get("candidate_model") or {}
+        if not candidate.get("weights_path"):
+            raise HTTPException(status_code=400, detail="No candidate model - run Download first")
+        model_doc = await db.models.find_one(
+            {"id": candidate.get("local_model_id"), "pipeline_run_id": rid}, {"id": 1}
+        )
+        if not model_doc:
+            raise HTTPException(
+                status_code=400,
+                detail="The downloaded model for this run was deleted - run Download again",
+            )
+        if not 0 < conf <= 1:
+            raise HTTPException(status_code=400, detail="conf must be between 0 and 1")
+        ext = (file.filename.rsplit(".", 1)[-1] if "." in (file.filename or "") else "").lower()
+        if ext not in ["mp4", "mov", "webm", "avi", "mkv"]:
+            raise HTTPException(status_code=400, detail="Unsupported video type")
+        content = await file.read()
+        if len(content) > 200 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Video too large (max 200MB)")
+
+        busy_run = await db.pipeline_runs.find_one(
+            {"pipeline_id": run["pipeline_id"], "busy": True}, {"id": 1}
+        )
+        if busy_run:
+            raise HTTPException(status_code=409, detail=f"Pipeline busy: run {busy_run['id']} is currently in progress")
+
+        test_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        await db.pipeline_runs.update_one(
+            {"id": rid},
+            {"$set": {"busy": True, "updated_at": now},
+             "$push": {"video_tests": {"id": test_id, "input_name": file.filename, "conf": conf,
+                                       "model_id": candidate.get("local_model_id"),
+                                       "status": "running", "started_at": now}}},
+        )
+
+        async def _job():
+            await asyncio.to_thread(
+                deployment_worker._pipeline_test_video_sync,
+                rid, run["project_id"], test_id, content, file.filename, conf,
+                s.get_object, s.put_object, s.APP_NAME,
+            )
+        background.add_task(_job)
+        return await db.pipeline_runs.find_one({"id": rid}, {"_id": 0})
+
+    @router.get("/pipeline/runs/{rid}/test-video/{test_id}")
+    async def get_test_video(rid: str, test_id: str, request: Request, current=Depends(get_current_user)):
+        run = await db.pipeline_runs.find_one({"id": rid})
+        if not run:
+            raise HTTPException(status_code=404, detail="Not found")
+        await s._project_access_check(run["project_id"], current["id"])
+        entry = next((t for t in run.get("video_tests", []) if t["id"] == test_id), None)
+        if not entry or not entry.get("output_path"):
+            raise HTTPException(status_code=404, detail="Not found")
+        data, _ct = await asyncio.to_thread(s.get_object, entry["output_path"])
+        total = len(data)
+        headers = {"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=31536000, immutable"}
+        rng = request.headers.get("range")
+        if rng and rng.startswith("bytes="):
+            start_s, _, end_s = rng[6:].partition("-")
+            start = int(start_s) if start_s else 0
+            end = int(end_s) if end_s else total - 1
+            end = min(end, total - 1)
+            if start > end:
+                raise HTTPException(status_code=416, detail="Bad range")
+            headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+            return Response(content=data[start:end + 1], status_code=206, media_type="video/mp4", headers=headers)
+        return Response(content=data, media_type="video/mp4", headers=headers)
 
     @router.post("/pipeline/runs/{rid}/approve")
     async def approve_pipeline_run(rid: str, current=Depends(get_current_user),
@@ -497,17 +629,10 @@ def register(s):
 
         if run.get("run_type") == "bootstrap":
             # stage/deploying is permanently blocked for bootstrap runs (M0's
-            # guard) - this is the only path to a terminal state for one, so
-            # the local-only activation happens here, not in a deploying
-            # stage call. Replicates POST /models/{mid}/activate's exact
-            # writes (routers/training.py:64-77), not an HTTP self-call - see
-            # deployment_worker._pipeline_deploying_sync's docstring for why.
-            candidate = run.get("candidate_model") or {}
-            local_model_id = candidate.get("local_model_id")
-            if not local_model_id:
+            # guard) - approval is the terminal step. The model is NOT
+            # activated here: activation is a manual choice in Model Training.
+            if not (run.get("candidate_model") or {}).get("local_model_id"):
                 raise HTTPException(status_code=400, detail="No candidate_model on run - run downloading_model first")
-            await db.models.update_many({"project_id": run["project_id"]}, {"$set": {"is_active": False}})
-            await db.models.update_one({"id": local_model_id}, {"$set": {"is_active": True, "activated_at": now}})
             update["status"] = "completed"
 
         await db.pipeline_runs.update_one({"id": rid}, {"$set": update})

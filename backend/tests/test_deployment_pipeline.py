@@ -436,26 +436,21 @@ def test_downloading_model_stage_invalid_body_rejected(hdr, fresh_project):
 
 # --- M7: testing stage --------------------------------------------------------
 
-def test_testing_stage_without_candidate_model_fails(hdr, fresh_project):
-    """testing needs no SSH or real Ultralytics run to reach this failure -
-    calling it before downloading_model has ever populated candidate_model
-    fails fast, mirroring M5/M6's precondition-failure tests exactly."""
+def test_testing_stage_requires_a_video_test(hdr, fresh_project):
+    """Finishing the Test step needs at least one succeeded video test."""
     run = _create_run(hdr, fresh_project)
-    rid = run["id"]
+    r = requests.post(f"{BASE_URL}/pipeline/runs/{run['id']}/stage/testing", headers=hdr)
+    assert r.status_code == 400
+    assert "video test" in r.json()["detail"]
 
-    start = time.monotonic()
-    r1 = requests.post(f"{BASE_URL}/pipeline/runs/{rid}/stage/testing", headers=hdr)
-    elapsed = time.monotonic() - start
-    assert r1.status_code == 200, r1.text
-    assert r1.json()["busy"] is True
-    assert elapsed < 5, f"stage/testing should return immediately, took {elapsed:.2f}s"
 
-    time.sleep(1)
-    r = requests.get(f"{BASE_URL}/pipeline/runs/{rid}", headers=hdr)
-    body = r.json()
-    assert body["busy"] is False
-    assert body["status"] == "failed"
-    assert "downloading_model" in body["error"]
+def test_test_video_without_candidate_model_rejected(hdr, fresh_project):
+    run = _create_run(hdr, fresh_project)
+    r = requests.post(
+        f"{BASE_URL}/pipeline/runs/{run['id']}/test-video", headers=hdr,
+        files={"file": ("t.mp4", b"x", "video/mp4")},
+    )
+    assert r.status_code == 400
 
 
 # --- M8: approve / reject / rollback ------------------------------------------
@@ -487,9 +482,9 @@ def test_reject_on_wrong_status_rejected(hdr, fresh_project):
     assert r.status_code == 409, r.text
 
 
-def test_bootstrap_approve_activates_locally_and_completes(hdr, fresh_project, db):
+def test_bootstrap_approve_completes_without_activating(hdr, fresh_project, db):
     """No SSH involved at all for a bootstrap approval, so this can run live
-    without a real remote host - the local-only activation branch."""
+    without a real remote host. Activation is manual, so approval leaves the model inactive."""
     run = _create_run(hdr, fresh_project)
     assert run["run_type"] == "bootstrap"
     mid = _seed_awaiting_approval_run(db, fresh_project, run["id"], run_type="bootstrap")
@@ -501,7 +496,7 @@ def test_bootstrap_approve_activates_locally_and_completes(hdr, fresh_project, d
     assert body["approval"]["decision"] == "approved"
 
     model = db.models.find_one({"id": mid})
-    assert model["is_active"] is True
+    assert model["is_active"] is False
 
 
 def test_reject_sets_terminal_status_and_makes_no_ssh_calls(hdr, fresh_project, db):
@@ -572,3 +567,23 @@ def test_list_pipeline_runs_returns_newest_first_with_last_deployed(hdr, fresh_p
     assert ids_in_order == [run2["id"], run1["id"]]  # newest first
     assert body["last_deployed_run_id"] == run1["id"]
     assert body["pipeline_id"] == pipeline["id"]
+
+
+# --- per-run saved form --------------------------------------------------------
+
+def test_run_form_saved_without_secrets_and_copied_to_next_run(hdr, fresh_project):
+    run = _create_run(hdr, fresh_project)
+    r = requests.put(
+        f"{BASE_URL}/pipeline/runs/{run['id']}/form", headers=hdr,
+        json={"host": "10.0.0.5", "username": "root", "remote_workdir": "/w",
+              "password": "secret", "pem_key": "KEY", "bogus": 1},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["form"] == {"host": "10.0.0.5", "username": "root", "remote_workdir": "/w"}
+
+    stored = requests.get(f"{BASE_URL}/pipeline/runs/{run['id']}", headers=hdr).json()
+    assert stored["form"]["host"] == "10.0.0.5"
+    assert "password" not in stored["form"] and "pem_key" not in stored["form"]
+
+    nxt = _create_run(hdr, fresh_project)
+    assert nxt["form"]["host"] == "10.0.0.5"

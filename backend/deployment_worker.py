@@ -803,10 +803,17 @@ def _pipeline_downloading_model_sync(run_id: str, project_id: str, history_index
 
         mid = str(uuid.uuid4())
         finished = _now_iso()
+        model_label = os.path.splitext(posixpath.basename(training.get("base_checkpoint_ref") or "") or "yolo")[0]
         sync_db.models.insert_one({
             "id": mid, "project_id": project_id, "type": "pipeline_candidate",
             "pipeline_run_id": run_id,
             "status": "trained", "is_active": False,
+            # Shown in Model Training with a "Trained from server" tag.
+            "source": "server", "trained_on": "server",
+            "name": f"Server-trained · {model_label} · {finished[:10]}",
+            "model_arch": model_label,
+            "epochs": hyperparams_used.get("epochs"),
+            "training_image_count": (run.get("dataset_export") or {}).get("train_count"),
             "classes": training_classes,
             "weights_path": storage_path, "weights_size": len(weights_bytes),
             "final_mAP": metrics["mAP50"], "final_loss": 1 - metrics["mAP50_95"],
@@ -827,7 +834,10 @@ def _pipeline_downloading_model_sync(run_id: str, project_id: str, history_index
                 },
                 f"stage_history.{history_index}.status": "succeeded",
                 f"stage_history.{history_index}.finished_at": finished,
-            }},
+            },
+            # A new download means a new model: earlier tests/approval were of
+            # the old one and must not carry over.
+            "$unset": {"video_tests": "", "test_progress": "", "approval": ""}},
         )
     except Exception as e:
         finished = _now_iso()
@@ -857,189 +867,108 @@ def _download_weights_to_tempfile(get_object_fn, storage_path: str) -> str:
     return local_path
 
 
-def _build_local_test_dataset_dir_sync(sync_db, test_image_ids: list, classes: list,
-                                        get_object_fn) -> tuple:
-    """Test-set-only local dataset builder - not a reuse of
-    _build_split_dataset_dir_sync (M4), which cuts a fresh random three-way
-    split; this one just materializes an already-decided list of
-    test_image_ids locally so pipeline_logic.evaluate() has real files to
-    read. train/val/test all point at the same directory since there's only
-    one split here (see module docstring's ultralytics-not-installed caveat -
-    deferred to the manual DoD)."""
-    tmp_root = tempfile.mkdtemp(prefix="pipeline_test_eval_")
-    img_dir = os.path.join(tmp_root, "test", "images")
-    lbl_dir = os.path.join(tmp_root, "test", "labels")
-    os.makedirs(img_dir, exist_ok=True)
-    os.makedirs(lbl_dir, exist_ok=True)
-    cls_to_idx = {c: i for i, c in enumerate(classes)}
+def _pipeline_test_video_sync(run_id: str, project_id: str, test_id: str, video_bytes: bytes,
+                               filename: str, conf: float, get_object_fn, put_object_fn,
+                               app_name: str) -> None:
+    """Video test for the Test step - the in-app version of the team's manual
+    yolo_video_infer.py: run the candidate weights over every frame of an
+    uploaded video, draw the detections (results[0].plot()), and store the
+    annotated video so a human can watch it and judge the model. Never marks
+    the run failed - a bad video only fails its own video_tests entry."""
+    import subprocess
+    import cv2
+    from ultralytics import YOLO
 
-    for img_id in test_image_ids:
-        img = sync_db.images.find_one({"id": img_id})
-        if not img:
-            continue
-        try:
-            data, _ct = get_object_fn(img["storage_path"])
-            if not data:
-                raise Exception("empty image data")
-            lines = [
-                line for a in img.get("annotations", [])
-                if (line := _yolo_label_line(a, cls_to_idx)) is not None
-            ]
-            ext = (img["filename"].rsplit(".", 1)[-1] if "." in img["filename"] else "jpg").lower()
-            with open(os.path.join(img_dir, f"{img_id}.{ext}"), "wb") as f:
-                f.write(data)
-            with open(os.path.join(lbl_dir, f"{img_id}.txt"), "w") as f:
-                f.write("\n".join(lines))
-        except Exception as ie:
-            logger.warning("Skip test image %s from local eval dataset: %s", img_id, ie)
-
-    yaml_path = os.path.join(tmp_root, "data.yaml")
-    with open(yaml_path, "w") as f:
-        f.write(
-            f"path: {yaml_root_path or tmp_root}\ntrain: test/images\nval: test/images\ntest: test/images\n"
-            f"nc: {len(classes)}\nnames: {classes}\n"
-        )
-    return tmp_root, yaml_path
-
-
-def _pipeline_testing_sync(run_id: str, project_id: str, history_index: int,
-                            yolo_predict_fn, get_object_fn, send_tester_email_fn, app_url: str) -> None:
-    """Runs local inference with the candidate model (M6) and the currently-
-    active model over the run's own held-out test set, evaluates both
-    (pipeline_logic.evaluate), feeds both mAP50s into decide_deploy(), and
-    notifies reviewers. No SSH is needed here at all - unlike every prior
-    real stage, everything this stage touches is already local or in object
-    storage."""
     sync_client = MongoClient(MONGO_URL)
     sync_db = sync_client[DB_NAME]
-    local_test_dir = None
-    candidate_local_pt = None
-    baseline_local_pt = None
-    try:
-        run = sync_db.pipeline_runs.find_one({"id": run_id})
-        if not run:
-            raise Exception("pipeline run not found")
+    tmp_paths = []
 
-        candidate = run.get("candidate_model") or {}
-        candidate_weights_path = candidate.get("weights_path")
-        if not candidate_weights_path:
+    def _tmp(suffix):
+        fd, path = tempfile.mkstemp(prefix=f"videotest_{run_id}_", suffix=suffix)
+        os.close(fd)
+        tmp_paths.append(path)
+        return path
+
+    def _set(fields):
+        sync_db.pipeline_runs.update_one(
+            {"id": run_id}, {"$set": {f"video_tests.$[t].{k}": v for k, v in fields.items()}},
+            array_filters=[{"t.id": test_id}],
+        )
+
+    try:
+        run = sync_db.pipeline_runs.find_one({"id": run_id}) or {}
+        weights_path = (run.get("candidate_model") or {}).get("weights_path")
+        if not weights_path:
             raise Exception("no candidate_model on run - run downloading_model first")
 
-        test_image_ids = (run.get("dataset_export") or {}).get("test_image_ids") or []
-        if not test_image_ids:
-            raise Exception("no dataset_export.test_image_ids on run - run uploading_data first")
+        in_path = _tmp(".mp4")
+        with open(in_path, "wb") as f:
+            f.write(video_bytes)
+        weights_local = _download_weights_to_tempfile(get_object_fn, weights_path)
+        tmp_paths.append(weights_local)
+        model = YOLO(weights_local)
 
-        project = sync_db.projects.find_one({"id": project_id}) or {}
-        classes = project.get("classes", [])
-        confidence = (project.get("settings") or {}).get("confidence_threshold", 0.4)
+        cap = cv2.VideoCapture(in_path)
+        if not cap.isOpened():
+            raise Exception("could not open the video file")
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or None
+        raw_out = _tmp(".mp4")
+        out = cv2.VideoWriter(raw_out, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
 
-        local_test_dir, data_yaml_path = _build_local_test_dataset_dir_sync(
-            sync_db, test_image_ids, classes, get_object_fn,
-        )
+        done = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            results = model(frame, conf=conf, verbose=False)
+            out.write(results[0].plot())
+            done += 1
+            if done % 10 == 0:
+                sync_db.pipeline_runs.update_one(
+                    {"id": run_id}, {"$set": {"test_progress": {"done": done, "total": total}}},
+                )
+        cap.release()
+        out.release()
+        if done == 0:
+            raise Exception("no frames could be read from the video")
 
-        # No active model yet (e.g. this project's very first fresh_production
-        # run) -> baseline is "beat nothing": all-zero metrics, gate trivially
-        # passes since any real mAP50 is >= 0.
-        baseline = sync_db.models.find_one({"project_id": project_id, "is_active": True, "status": "trained"})
-        baseline_weights_path = baseline.get("weights_path") if baseline else None
-
-        candidate_local_pt = _download_weights_to_tempfile(get_object_fn, candidate_weights_path)
-        candidate_metrics = pipeline_logic.evaluate(candidate_local_pt, data_yaml_path, split="test")
-
-        if baseline_weights_path:
-            baseline_local_pt = _download_weights_to_tempfile(get_object_fn, baseline_weights_path)
-            baseline_metrics = pipeline_logic.evaluate(baseline_local_pt, data_yaml_path, split="test")
-        else:
-            baseline_metrics = {"mAP50": 0.0, "mAP50_95": 0.0, "precision": 0.0, "recall": 0.0}
-
-        decision_gate_passed = pipeline_logic.decide_deploy(baseline_metrics["mAP50"], candidate_metrics["mAP50"])
-
-        # Each model decodes against its OWN training-time class list, not
-        # the live project list - candidate and baseline may have been
-        # trained at different times with different class snapshots.
-        candidate_classes = (run.get("dataset_export") or {}).get("classes") or classes
-        baseline_classes = (baseline.get("classes") if baseline else None) or classes
-
-        sample_predictions = []
-        for img_id in test_image_ids[:20]:
-            img = sync_db.images.find_one({"id": img_id})
-            if not img:
-                continue
-            data, _ct = get_object_fn(img["storage_path"])
-            candidate_boxes = yolo_predict_fn(candidate_weights_path, data, candidate_classes, confidence)
-            baseline_boxes = (
-                yolo_predict_fn(baseline_weights_path, data, baseline_classes, confidence)
-                if baseline_weights_path else []
-            )
-            sample_predictions.append({
-                "image_id": img_id,
-                "candidate_boxes": candidate_boxes,
-                "baseline_boxes": baseline_boxes,
-                "ground_truth": img.get("annotations", []),
-            })
-
-        # Best-effort: matches send_invite_email's own "fails silently"
-        # philosophy - the stage's real job (inference + the gate) succeeds
-        # regardless of email delivery.
-        tester_notified_at = None
-        if project.get("team_id"):
+        # OpenCV's mp4v isn't playable in browsers - re-encode to H.264.
+        web_out = _tmp(".mp4")
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
             try:
-                members = list(sync_db.team_members.find({
-                    "team_id": project["team_id"],
-                    "role": {"$in": ["owner", "admin", "reviewer"]},
-                    "status": "active",
-                }))
-                user_ids = [m["user_id"] for m in members]
-                users = list(sync_db.users.find({"id": {"$in": user_ids}})) if user_ids else []
-                to_emails = [u["email"] for u in users if u.get("email")]
-                if to_emails:
-                    send_tester_email_fn(to_emails, project.get("name", ""), project_id, run_id, app_url)
-                    tester_notified_at = _now_iso()
-            except Exception as ee:
-                logger.warning("Tester notification email failed for run %s: %s", run_id, ee)
+                import imageio_ffmpeg
+                ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+            except Exception:
+                ffmpeg = None
+        final_path = raw_out
+        if ffmpeg:
+            proc = subprocess.run(
+                [ffmpeg, "-y", "-i", raw_out, "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                 "-movflags", "+faststart", "-an", web_out],
+                capture_output=True, timeout=1800,
+            )
+            if proc.returncode == 0:
+                final_path = web_out
+            else:
+                logger.warning("ffmpeg re-encode failed for %s: %s", run_id, proc.stderr[-500:])
 
-        finished = _now_iso()
-        sync_db.pipeline_runs.update_one(
-            {"id": run_id},
-            {"$set": {
-                "busy": False,
-                "updated_at": finished,
-                # awaiting_approval isn't itself a callable stage - nothing
-                # else can produce it, so testing's own success is what
-                # advances the run into the human-review state M8's
-                # approve/reject endpoints are gated on.
-                "status": "awaiting_approval",
-                "testing": {
-                    "sample_predictions": sample_predictions,
-                    "tester_notified_at": tester_notified_at,
-                },
-                "baseline_comparison": {
-                    "baseline_model_id": baseline.get("id") if baseline else None,
-                    "baseline_metrics": baseline_metrics,
-                    "delta_map50": candidate_metrics["mAP50"] - baseline_metrics["mAP50"],
-                    "decision_gate_passed": decision_gate_passed,
-                },
-                f"stage_history.{history_index}.status": "succeeded",
-                f"stage_history.{history_index}.finished_at": finished,
-            }},
-        )
+        with open(final_path, "rb") as f:
+            out_bytes = f.read()
+        storage_path = f"{app_name}/projects/{project_id}/pipeline_runs/{run_id}/test_{test_id}.mp4"
+        put_object_fn(storage_path, out_bytes, "video/mp4")
+        _set({"status": "succeeded", "output_path": storage_path, "frames": done,
+              "finished_at": _now_iso()})
     except Exception as e:
-        finished = _now_iso()
-        sync_db.pipeline_runs.update_one(
-            {"id": run_id},
-            {"$set": {
-                "busy": False,
-                "updated_at": finished,
-                "status": "failed",
-                "error": str(e)[:2000],
-                f"stage_history.{history_index}.status": "failed",
-                f"stage_history.{history_index}.finished_at": finished,
-            }},
-        )
+        _set({"status": "failed", "error": str(e)[:1000], "finished_at": _now_iso()})
     finally:
-        if local_test_dir:
-            shutil.rmtree(local_test_dir, ignore_errors=True)
-        for p in (candidate_local_pt, baseline_local_pt):
+        sync_db.pipeline_runs.update_one(
+            {"id": run_id}, {"$set": {"busy": False, "updated_at": _now_iso()}, "$unset": {"test_progress": ""}},
+        )
+        for p in tmp_paths:
             if p and os.path.exists(p):
                 os.remove(p)
         sync_client.close()

@@ -439,7 +439,7 @@ async def _project_out(pid: str):
         # so this field can never disagree with what auto-label actually does.
         db.models.find_one(
             {"project_id": pid, "is_active": True, "status": "trained"},
-            {"_id": 0, "id": 1, "model_arch": 1, "type": 1, "final_mAP": 1, "activated_at": 1},
+            {"_id": 0, "id": 1, "name": 1, "model_arch": 1, "type": 1, "source": 1, "final_mAP": 1, "activated_at": 1},
         ),
     )
     settings = p.get("settings", {})

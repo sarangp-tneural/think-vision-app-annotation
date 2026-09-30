@@ -79,6 +79,8 @@ def register(s):
             raise HTTPException(status_code=404, detail="Not found")
         await s._project_access_check(m["project_id"], current["id"], roles=["owner", "admin"])
         await db.models.delete_one({"id": mid})
+        # Drop the in-memory copy too so a deleted model can't keep predicting.
+        s._yolo_cache.pop(m.get("weights_path"), None)
         await s._log_activity(m["project_id"], current["id"], "model_deleted", {"model_id": mid})
         return {"ok": True}
 
