@@ -74,11 +74,11 @@ export default function TeamDetail() {
     }
   };
 
-  const removeMember = async (mid) => {
-    if (!window.confirm("Remove this member?")) return;
+  const removeMember = async (mid, pending) => {
+    if (!window.confirm(pending ? "Cancel this invite?" : "Remove this member?")) return;
     try {
       await api.delete(`/teams/${tid}/members/${mid}`);
-      toast.success("Member removed");
+      toast.success(pending ? "Invite cancelled" : "Member removed");
       load();
     } catch (e) {
       toast.error(e.response?.data?.detail || "Remove failed");
@@ -246,7 +246,7 @@ export default function TeamDetail() {
                     <div className={`flex items-center gap-2 text-xs uppercase tracking-[0.2em] ${roleMeta.color}`}>
                       <RoleIcon className="w-3 h-3" /> {roleMeta.label}
                     </div>
-                    {myRole === "owner" && m.role !== "owner" && (
+                    {canManage && m.role !== "owner" && (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <button className="text-muted-foreground hover:text-primary transition-colors" data-testid={`member-menu-${m.id}`}>
@@ -254,17 +254,17 @@ export default function TeamDetail() {
                           </button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent className="bg-[#121212] border-[#27272A] rounded-sm">
-                          {["admin", "annotator", "reviewer", "member"].filter((r) => r !== m.role).map((r) => (
+                          {myRole === "owner" && m.status !== "pending" && ["admin", "annotator", "reviewer", "member"].filter((r) => r !== m.role).map((r) => (
                             <DropdownMenuItem key={r} onClick={() => changeRole(m.id, r)} data-testid={`set-role-${r}-${m.id}`}>
                               <Shield className="w-4 h-4 mr-2" /> Set as {r.charAt(0).toUpperCase() + r.slice(1)}
                             </DropdownMenuItem>
                           ))}
                           <DropdownMenuItem
-                            onClick={() => removeMember(m.id)}
+                            onClick={() => removeMember(m.id, m.status === "pending")}
                             className="text-destructive focus:text-destructive"
                             data-testid={`remove-member-${m.id}`}
                           >
-                            <UserMinus className="w-4 h-4 mr-2" /> Remove
+                            <UserMinus className="w-4 h-4 mr-2" /> {m.status === "pending" ? "Cancel invite" : "Remove"}
                           </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
