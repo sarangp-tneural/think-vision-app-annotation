@@ -62,6 +62,20 @@ export default function Annotator() {
   const [replyText, setReplyText] = useState("");
   const currentUser = getUser();
 
+  // Mirrors the server's rules (_image_edit_check): the server is the authority, this keeps the UI honest.
+  const myRole = !project ? null : project.team_id ? (members.find((m) => m.user_id === currentUser?.id)?.role || null) : "owner";
+  const canManageRole = myRole === "owner" || myRole === "admin";
+  const status = image?.review_status || "unassigned";
+  const assignee = image?.assigned_to || null;
+  let lockReason = null;
+  if (myRole === "reviewer") lockReason = "Reviewers review annotations but can't edit them.";
+  else if (status === "submitted") lockReason = "Waiting for review. Editing is locked.";
+  else if (status === "approved") lockReason = "Approved. This image is locked.";
+  else if (canManageRole) { if (assignee && assignee !== currentUser?.id) lockReason = "Assigned to another team member."; }
+  else if (myRole && assignee !== currentUser?.id) lockReason = "This image isn't assigned to you.";
+  else if (myRole && !["assigned", "rejected"].includes(status)) lockReason = "This image isn't open for annotation.";
+  const readOnly = !image || !myRole || !!lockReason;
+
   // Project, image list and team members don't change between images, so they
   // load once per project; only the image and its comments reload on navigation.
   const loadProject = async () => {
@@ -148,6 +162,7 @@ export default function Annotator() {
   };
 
   const commitBoxes = (next) => {
+    if (readOnly) return;
     // Ensure each annotation has a stable uid for React keys
     const withIds = next.map((b) => b.uid ? b : { ...b, uid: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}` });
     setBoxes(withIds);
@@ -161,6 +176,7 @@ export default function Annotator() {
       setPanning({ startX: e.clientX, startY: e.clientY, origX: pan.x, origY: pan.y });
       return;
     }
+    if (readOnly) return;
     const p = getPos(e);
     const label = activeLabel || "object";
 
@@ -178,6 +194,7 @@ export default function Annotator() {
     e.stopPropagation();
     e.preventDefault();
     setSelectedIdx(idx);
+    if (readOnly) return;
     const b = boxes[idx];
     if (!b || (b.type && b.type !== "bbox")) return;
     setEditing({
@@ -304,7 +321,7 @@ export default function Annotator() {
   };
 
   const save = async (isAuto = false) => {
-    if (saving) return;
+    if (saving || readOnly) return;
     setSaving(true);
     try {
       // Strip client-only fields (uid) before saving
@@ -313,6 +330,8 @@ export default function Annotator() {
       const { data } = await api.put(`/images/${imgId}/annotations`, { boxes: cleanBoxes });
       setDirty(false);
       setLastSaved(new Date());
+      // Saving an unassigned image as owner/admin claims it (the server does the same).
+      setImage((im) => (im && !im.assigned_to ? { ...im, assigned_to: currentUser?.id, review_status: "assigned" } : im));
       if (!isAuto) toast.success(`Saved ${boxes.length} annotations`);
       // The PUT response already carries the (possibly-updated) class list,
       // so no separate GET /projects/{pid} round trip is needed here.
@@ -365,6 +384,7 @@ export default function Annotator() {
   }, [dirty]);
 
   const autoLabel = async () => {
+    if (readOnly) return;
     setAutoLoading(true);
     try {
       const { data } = await api.post(`/images/${imgId}/auto-label`);
@@ -415,8 +435,8 @@ export default function Annotator() {
 
   // ---- Review workflow ----
   const isAssignedToMe = image?.assigned_to === currentUser?.id;
-  const canReview = project?.team_id && members.find((m) => m.user_id === currentUser?.id && ["owner", "admin", "reviewer"].includes(m.role));
-  const reviewStatus = image?.review_status || "unassigned";
+  const canReview = project?.team_id ? ["owner", "admin", "reviewer"].includes(myRole) : myRole === "owner";
+  const reviewStatus = status;
 
   const assign = async (userId) => {
     try {
@@ -566,7 +586,7 @@ export default function Annotator() {
                 <ZoomIn className="w-4 h-4" />
               </button>
             </div>
-            <Button variant="ghost" size="sm" onClick={undo} disabled={boxes.length === 0} className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="undo-btn" title="Undo (⌘Z)">
+            <Button variant="ghost" size="sm" onClick={undo} disabled={boxes.length === 0 || readOnly} className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="undo-btn" title="Undo (⌘Z)">
               <Undo2 className="w-4 h-4 mr-1" /> Undo
             </Button>
             <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.15em] text-muted-foreground" data-testid="autolabel-provider">
@@ -585,7 +605,7 @@ export default function Annotator() {
               variant="outline"
               size="sm"
               onClick={autoLabel}
-              disabled={autoLoading}
+              disabled={autoLoading || readOnly}
               className="rounded-sm h-8 border-[#27272A] bg-transparent hover:bg-[#1C1C1C] hover:border-primary hover:text-primary text-xs uppercase tracking-[0.2em]"
               data-testid="auto-label-btn"
             >
@@ -594,7 +614,7 @@ export default function Annotator() {
             <Button
               size="sm"
               onClick={() => save()}
-              disabled={saving}
+              disabled={saving || readOnly}
               className="rounded-sm bg-primary text-black hover:bg-cyan-400 h-8 text-xs uppercase tracking-[0.2em] font-bold"
               data-testid="save-btn"
               title="Save (⌘S)"
@@ -895,6 +915,12 @@ export default function Annotator() {
               <span className="uppercase tracking-wider">{reviewStatus.replace("_", " ")}</span>
             </div>
 
+            {lockReason && (
+              <div className="text-[11px] p-2 border border-[#EAB308]/40 bg-[#EAB308]/10 mb-3 text-[#EAB308]" data-testid="annotator-lock-banner">
+                {lockReason}
+              </div>
+            )}
+
             {image?.review_notes && (
               <div className="text-[11px] p-2 border border-[#27272A] bg-[#121212] mb-3 text-muted-foreground">
                 <div className="text-[9px] uppercase tracking-[0.2em] text-primary mb-1">Reviewer note</div>
@@ -903,7 +929,12 @@ export default function Annotator() {
             )}
 
             {/* Assign */}
-            {members.length > 0 && (
+            {members.length > 0 && !canManageRole && (
+              <div className="mb-3 text-xs text-muted-foreground">
+                Assigned to: <span className="text-foreground">{members.find((m) => m.user_id === assignee)?.name || "nobody"}</span>
+              </div>
+            )}
+            {members.length > 0 && canManageRole && (
               <div className="mb-3">
                 <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-1">Assigned to</div>
                 <Select value={image?.assigned_to || "__none__"} onValueChange={(v) => assign(v === "__none__" ? null : v)}>
@@ -922,7 +953,7 @@ export default function Annotator() {
 
             {/* Submit / Review actions */}
             <div className="space-y-2">
-              {isAssignedToMe && reviewStatus !== "submitted" && reviewStatus !== "approved" && (
+              {isAssignedToMe && myRole !== "reviewer" && ["assigned", "rejected"].includes(reviewStatus) && (
                 <Button
                   size="sm"
                   onClick={submitForReview}
@@ -945,7 +976,8 @@ export default function Annotator() {
                   <Button
                     size="sm"
                     onClick={() => {
-                      const notes = window.prompt("Reason for rejection?") || "";
+                      const notes = (window.prompt("What needs to be fixed? (required)") || "").trim();
+                      if (!notes) { toast.error("Add a note so the annotator knows what to fix"); return; }
                       review("reject", notes);
                     }}
                     variant="outline"

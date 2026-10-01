@@ -49,9 +49,9 @@ def _seed_project_and_run(db, image_count=10):
     for i in range(image_count):
         db.images.insert_one({
             "id": str(uuid.uuid4()), "project_id": pid, "filename": f"seed_{i}.jpg",
-            "storage_path": f"fake/{pid}/{i}.jpg", "annotated": True,
+            "storage_path": f"fake/{pid}/{i}.jpg", "annotated": True, "review_status": "approved",
             "annotations": [{"type": "bbox", "label": "widget", "x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}],
-            "review_status": "unassigned", "created_at": now,
+            "created_at": now,
         })
     rid = str(uuid.uuid4())
     db.pipeline_runs.insert_one({

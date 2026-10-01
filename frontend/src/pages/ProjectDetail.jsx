@@ -373,6 +373,7 @@ export default function ProjectDetail() {
                 </DialogContent>
               </Dialog>
             )}
+            {canManage && (<>
             <Button
               variant="outline"
               onClick={() => navigate(`/projects/${pid}/versions`)}
@@ -389,6 +390,7 @@ export default function ProjectDetail() {
             >
               <Rocket className="w-4 h-4 mr-2" /> Deploy
             </Button>
+            </>)}
             {canManage && (
               <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
                 <DialogTrigger asChild>
@@ -525,12 +527,12 @@ export default function ProjectDetail() {
         </div>
 
         {/* Training nudge */}
-        {project.image_count > 0 && project.annotated_count >= 30 && (
+        {myRole !== "reviewer" && project.image_count > 0 && project.annotated_count >= 30 && (
           <div className="mb-6 panel p-4 flex items-center gap-3 border-l-2 border-l-primary" data-testid="train-nudge">
             <Sparkles className="w-5 h-5 text-primary flex-shrink-0" />
             <div className="flex-1">
               <div className="text-sm font-medium">
-                You have {project.annotated_count} labeled images — enough to train your own model!
+                You have {project.annotated_count} approved images — enough to train your own model!
               </div>
               <div className="text-xs text-muted-foreground mt-0.5">
                 Train YOLOv8n on your data and start auto-labeling without depending on Gemini.
@@ -554,8 +556,11 @@ export default function ProjectDetail() {
             <div className="font-heading text-3xl font-bold" data-testid="stat-total-images">{project.image_count}</div>
           </div>
           <div className="border-r border-b border-[#27272A] p-5">
-            <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2">Annotated</div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2">Approved</div>
             <div className="font-heading text-3xl font-bold text-primary" data-testid="stat-annotated">{project.annotated_count}</div>
+            <div className="text-[11px] text-muted-foreground mt-1" data-testid="stat-awaiting-review">
+              {Math.max((project.labeled_count || 0) - project.annotated_count, 0)} labeled, not approved yet
+            </div>
           </div>
           <div className="border-r border-b border-[#27272A] p-5">
             <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2">Classes</div>
@@ -662,12 +667,12 @@ export default function ProjectDetail() {
             <TabsTrigger value="images" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-images">
               Images ({images.length})
             </TabsTrigger>
-            <TabsTrigger value="upload" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-upload">
+            {myRole !== "reviewer" && <TabsTrigger value="upload" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-upload">
               Upload
-            </TabsTrigger>
-            <TabsTrigger value="video" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-video">
+            </TabsTrigger>}
+            {myRole !== "reviewer" && <TabsTrigger value="video" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-video">
               Video ({videos.length})
-            </TabsTrigger>
+            </TabsTrigger>}
             <TabsTrigger value="queue" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-queue" onClick={() => !alQueue && loadALQueue()}>
               <TrendingUp className="w-3 h-3 mr-2" /> AL Queue
             </TabsTrigger>
@@ -841,7 +846,7 @@ export default function ProjectDetail() {
                 >
                   <ActivityIcon className="w-4 h-4 mr-2" /> Activity
                 </Button>
-                <Button
+                {myRole !== "reviewer" && <Button
                   onClick={openBatchLabel}
                   disabled={batchJob && batchJob.status !== "completed"}
                   variant="outline"
@@ -852,7 +857,7 @@ export default function ProjectDetail() {
                   {batchJob && batchJob.status !== "completed"
                     ? `Labeling ${batchJob.processed}/${batchJob.total}...`
                     : "Batch Auto-Label"}
-                </Button>
+                </Button>}
               </div>
             </div>
 
@@ -1026,8 +1031,8 @@ export default function ProjectDetail() {
                             draggable={false}
                             loading="lazy"
                           />
-                          {img.annotated && (
-                            <div className="absolute top-2 right-2 bg-primary text-black w-6 h-6 flex items-center justify-center" title="Annotated">
+                          {img.review_status === "approved" && (
+                            <div className="absolute top-2 right-2 bg-primary text-black w-6 h-6 flex items-center justify-center" title="Approved">
                               <CheckCircle2 className="w-4 h-4" />
                             </div>
                           )}
@@ -1041,13 +1046,13 @@ export default function ProjectDetail() {
                               <Film className="w-2.5 h-2.5" /> Video
                             </div>
                           )}
-                          <button
+                          {canManage && img.review_status !== "approved" && <button
                             onClick={(e) => deleteImage(img.id, e)}
                             className="absolute top-2 left-2 opacity-0 group-hover:opacity-100 bg-[#050505]/80 text-muted-foreground hover:text-destructive w-6 h-6 flex items-center justify-center transition-opacity"
                             data-testid={`delete-image-${img.id}`}
                           >
                             <Trash2 className="w-3 h-3" />
-                          </button>
+                          </button>}
                         </div>
                         <div className="p-2 border-t border-[#27272A]">
                           <div className="text-[10px] truncate text-muted-foreground">{img.filename}</div>

@@ -17,7 +17,7 @@ def register(s):
 
     @router.post("/projects/{pid}/images")
     async def upload_image(pid: str, file: UploadFile = File(...), current=Depends(get_current_user)):
-        await s._verify_project(pid, current["id"])
+        await s._require_not_reviewer(pid, current["id"])
         ext = (file.filename.rsplit(".", 1)[-1] if "." in file.filename else "bin").lower()
         if ext not in ["jpg", "jpeg", "png", "webp", "gif"]:
             raise HTTPException(status_code=400, detail="Unsupported file type")
@@ -71,7 +71,9 @@ def register(s):
         img = await db.images.find_one({"id": img_id})
         if not img:
             raise HTTPException(status_code=404, detail="Not found")
-        await s._project_access_check(img["project_id"], current["id"])
+        await s._project_access_check(img["project_id"], current["id"], roles=["owner", "admin"])
+        if (img.get("review_status") or "unassigned") in s.LOCKED_STATUSES:
+            raise HTTPException(status_code=409, detail="Image is under review or approved and cannot be reassigned")
         project = await db.projects.find_one({"id": img["project_id"]})
         tid = project.get("team_id")
         target = payload.user_id
@@ -92,9 +94,16 @@ def register(s):
         if not img:
             raise HTTPException(status_code=404, detail="Not found")
         await s._project_access_check(img["project_id"], current["id"])
+        if img.get("assigned_to") != current["id"]:
+            raise HTTPException(status_code=403, detail="Only the person this image is assigned to can submit it")
+        if (img.get("review_status") or "unassigned") not in ("assigned", "rejected"):
+            raise HTTPException(status_code=409, detail="Image has already been submitted or approved")
         if not img.get("annotations"):
             raise HTTPException(status_code=400, detail="Add at least one annotation before submitting")
-        await db.images.update_one({"id": img_id}, {"$set": {"review_status": "submitted", "submitted_at": datetime.now(timezone.utc).isoformat()}})
+        await db.images.update_one({"id": img_id}, {"$set": {
+            "review_status": "submitted", "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "review_notes": "", "reviewed_by": None, "reviewed_at": None,  # previous verdict no longer applies
+        }})
         await s._log_activity(img["project_id"], current["id"], "image_submitted", {"image_id": img_id})
         project = await db.projects.find_one({"id": img["project_id"]})
         if project and project.get("team_id"):
@@ -119,6 +128,14 @@ def register(s):
             await s._project_access_check(img["project_id"], current["id"])
         if payload.decision not in ["approve", "reject"]:
             raise HTTPException(status_code=400, detail="Invalid decision")
+        if img.get("review_status") != "submitted":
+            raise HTTPException(status_code=409, detail="Only submitted images can be reviewed")
+        if payload.decision == "reject" and not (payload.notes or "").strip():
+            raise HTTPException(status_code=400, detail="Add a note explaining what to fix")
+        # Nobody reviews their own work, unless they are the only person who could (solo workspace).
+        if current["id"] in (img.get("annotated_by"), img.get("assigned_to")) and tid \
+                and await s._has_other_reviewer(tid, current["id"]):
+            raise HTTPException(status_code=403, detail="You cannot review your own annotations")
         await db.images.update_one({"id": img_id}, {"$set": {
             "review_status": "approved" if payload.decision == "approve" else "rejected",
             "review_notes": payload.notes or "",
@@ -165,12 +182,16 @@ def register(s):
         img = await db.images.find_one({"id": img_id})
         if not img:
             raise HTTPException(status_code=404, detail="Not found")
-        await s._project_access_check(img["project_id"], current["id"])
+        await s._image_edit_check(img, current["id"])
         boxes = [b.model_dump() for b in payload.boxes]
-        await db.images.update_one({"id": img_id}, {"$set": {
+        changes = {
             "annotations": boxes, "annotated": len(boxes) > 0,
             "annotated_by": current["id"], "annotated_at": datetime.now(timezone.utc).isoformat(),
-        }})
+        }
+        if not img.get("assigned_to"):  # owner/admin annotating an unassigned image claims it
+            changes["assigned_to"] = current["id"]
+            changes["review_status"] = "assigned"
+        await db.images.update_one({"id": img_id}, {"$set": changes})
         project = await db.projects.find_one({"id": img["project_id"]}, {"classes": 1})
         existing = set(project.get("classes", []))
         new_labels = {b["label"] for b in boxes} - existing
@@ -188,6 +209,8 @@ def register(s):
         img = await db.images.find_one({"id": img_id})
         if not img:
             raise HTTPException(status_code=404, detail="Not found")
-        await s._project_access_check(img["project_id"], current["id"])
+        await s._project_access_check(img["project_id"], current["id"], roles=["owner", "admin"])
+        if img.get("review_status") == "approved":
+            raise HTTPException(status_code=409, detail="Approved images cannot be deleted")
         await db.images.delete_one({"id": img_id})
         return {"ok": True}

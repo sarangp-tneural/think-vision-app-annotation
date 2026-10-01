@@ -63,7 +63,7 @@ def register(s):
         for p in projects:
             pid = p["id"]
             image_count = await db.images.count_documents({"project_id": pid})
-            annotated_count = await db.images.count_documents({"project_id": pid, "annotated": True})
+            annotated_count = await db.images.count_documents({"project_id": pid, "review_status": "approved"})
             tid = p.get("team_id")
             if tid and tid not in team_name_map:
                 t = await db.teams.find_one({"id": tid}, {"_id": 0})

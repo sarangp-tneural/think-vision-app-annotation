@@ -9,16 +9,11 @@ import uuid
 from datetime import date, timedelta
 from pathlib import Path
 
-os.environ["DB_NAME"] = "thinkvision_test_manager"
-os.environ["ALLOWED_EMAIL_DOMAIN"] = ""
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bcrypt  # noqa: E402
 import pytest  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
-from pymongo import MongoClient  # noqa: E402
-
-import server  # noqa: E402
+from _inprocess import fresh_db, get_client  # noqa: E402
 
 TODAY = date.today().isoformat()
 YESTERDAY = (date.today() - timedelta(days=1)).isoformat()
@@ -26,16 +21,12 @@ YESTERDAY = (date.today() - timedelta(days=1)).isoformat()
 
 @pytest.fixture(scope="module")
 def db():
-    client = MongoClient(os.environ["MONGO_URL"])
-    client.drop_database(os.environ["DB_NAME"])
-    yield client[os.environ["DB_NAME"]]
-    client.drop_database(os.environ["DB_NAME"])
+    yield fresh_db()
 
 
 @pytest.fixture(scope="module")
 def client(db):
-    with TestClient(server.app) as c:
-        yield c
+    return get_client()
 
 
 def _register(client, name):
@@ -157,3 +148,10 @@ def test_csv_export_neutralises_formulas(client, world):
 def test_range_validation(client, world):
     assert client.get("/api/manager/overview?from=2026-02-01&to=2026-01-01", headers=world["mgr"]).status_code == 400
     assert client.get("/api/manager/overview?from=abc", headers=world["mgr"]).status_code == 400
+
+
+def test_normal_login_returns_role_so_managers_reach_their_dashboard(client, world):
+    r = client.post("/api/auth/login", json={"email": "boss@tneuralai.com", "password": "managerpw1"})
+    assert r.status_code == 200 and r.json()["user"]["role"] == "manager"
+    r = client.post("/api/auth/login", json={"email": "alice@example.com", "password": "pw123456"})
+    assert r.json()["user"]["role"] == "user"

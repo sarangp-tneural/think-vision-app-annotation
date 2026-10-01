@@ -83,7 +83,7 @@ def _build_split_dataset_dir_sync(sync_db, project_id: str, classes: list,
     {split}/{images,labels}/ layout and shuffle/cut logic, but using a sync
     pymongo db handle and an injected get_object_fn instead of the module
     Motor db (which cannot safely be touched from this worker thread)."""
-    images = list(sync_db.images.find({"project_id": project_id, "annotated": True}, {"_id": 0}).limit(2000))
+    images = list(sync_db.images.find({"project_id": project_id, "annotated": True, "review_status": "approved"}, {"_id": 0}).limit(2000))
     # label_classes overrides the index order used in label files (merge mode
     # writes indices in the *remote* dataset's class order).
     cls_to_idx = {c: i for i, c in enumerate(label_classes if label_classes is not None else classes)}
@@ -465,7 +465,7 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
                         # sample of annotated images (may overlap remote training data).
                         "test_image_ids": [
                             i["id"] for i in sync_db.images.find(
-                                {"project_id": project_id, "annotated": True}, {"id": 1, "_id": 0}
+                                {"project_id": project_id, "annotated": True, "review_status": "approved"}, {"id": 1, "_id": 0}
                             ).limit(50)
                         ],
                     }

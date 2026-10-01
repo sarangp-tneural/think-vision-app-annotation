@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
-import { api } from "@/lib/api";
+import { api, getUser } from "@/lib/api";
 import Navbar from "@/components/Navbar";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -39,6 +39,12 @@ export default function ModelDeploy() {
   const [activating, setActivating] = useState(null);
   const [switchingToGemini, setSwitchingToGemini] = useState(false);
   const [editingModelId, setEditingModelId] = useState(null);
+  const [myRole, setMyRole] = useState(null);
+  const me = getUser();
+  // Owners/admins run the deploy pipeline and manage models; annotators train and use assist models.
+  const canManage = myRole === "owner" || myRole === "admin";
+  const canTrain = myRole !== "reviewer";
+  const canActivate = (m) => canManage || (canTrain && m.user_id === me?.id && !m.source);
   const [editModelName, setEditModelName] = useState("");
 
   const load = async () => {
@@ -51,6 +57,9 @@ export default function ModelDeploy() {
         api.get(`/system/versions`).catch(() => ({ data: null })),
       ]);
       setProject(p.data);
+      if (p.data.team_id) {
+        api.get("/teams").then((r) => setMyRole(r.data.find((t) => t.id === p.data.team_id)?.role || null)).catch(() => {});
+      } else { setMyRole("owner"); }
       setVersions(v.data);
       setModels(m.data);
       setTrainingPlan(tp.data);
@@ -220,7 +229,7 @@ export default function ModelDeploy() {
               <div className="text-xs text-muted-foreground">Used for auto-labeling whenever no trained model is active.</div>
             </div>
           </div>
-          {models.some((m) => m.is_active && m.status === "trained") && (
+          {canManage && models.some((m) => m.is_active && m.status === "trained") && (
             <Button
               size="sm"
               onClick={useGemini}
@@ -234,17 +243,17 @@ export default function ModelDeploy() {
           )}
         </div>
 
-        <Tabs defaultValue={["real", "simulated", "pipeline"].includes(params.get("tab")) ? params.get("tab") : "real"} className="space-y-6">
+        <Tabs defaultValue={["real", "simulated", "pipeline"].includes(params.get("tab")) && (canManage || params.get("tab") === "real") ? params.get("tab") : "real"} className="space-y-6">
           <TabsList className="bg-transparent border border-[#27272A] rounded-sm p-0 h-auto">
             <TabsTrigger value="real" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-real-training">
               <Zap className="w-3 h-3 mr-2" /> Model Training
             </TabsTrigger>
-            <TabsTrigger value="simulated" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-simulated">
+            {canManage && <TabsTrigger value="simulated" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-simulated">
               Simulated
-            </TabsTrigger>
-            <TabsTrigger value="pipeline" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-pipeline">
+            </TabsTrigger>}
+            {canManage && <TabsTrigger value="pipeline" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-pipeline">
               <Server className="w-3 h-3 mr-2" /> Deploy Pipeline
-            </TabsTrigger>
+            </TabsTrigger>}
           </TabsList>
 
           {/* REAL TRAINING TAB */}
@@ -290,7 +299,8 @@ export default function ModelDeploy() {
                 <div className="md:col-span-2">
                   <Button
                     onClick={trainReal}
-                    disabled={realTraining && !["trained", "failed", "cancelled"].includes(realTraining.status)}
+                    disabled={!canTrain || (realTraining && !["trained", "failed", "cancelled"].includes(realTraining.status))}
+                    title={canTrain ? undefined : "Reviewers can't train models"}
                     className="w-full rounded-sm bg-primary text-black hover:bg-cyan-400 h-10 text-xs uppercase tracking-[0.2em] font-bold"
                     data-testid="train-real-btn"
                   >
@@ -331,7 +341,7 @@ export default function ModelDeploy() {
                             : `Training on ${realTraining.training_image_count} images · epoch ${realTraining.current_epoch || 0}/${realTraining.epochs}${realTraining.progress != null ? ` · ${realTraining.progress}%` : ""}`}
                     </div>
                   </div>
-                  {realTraining.status === "trained" && !realTraining.is_active && (
+                  {realTraining.status === "trained" && !realTraining.is_active && canActivate(realTraining) && (
                     <Button
                       size="sm"
                       onClick={() => activateModel(realTraining.id)}
@@ -342,7 +352,7 @@ export default function ModelDeploy() {
                       Set Active
                     </Button>
                   )}
-                  {["queued", "preparing", "training"].includes(realTraining.status) && (
+                  {canManage && ["queued", "preparing", "training"].includes(realTraining.status) && (
                     <Button
                       size="sm"
                       variant="outline"
@@ -400,9 +410,9 @@ export default function ModelDeploy() {
                             ) : (
                               <>
                                 <span data-testid={`model-name-${m.id}`}>{m.name || `${m.model_arch} · ${m.epochs ?? "?"} epochs`}</span>
-                                <button onClick={() => startRenaming(m)} className="text-muted-foreground hover:text-primary" title="Rename" data-testid={`model-name-edit-${m.id}`}>
+                                {canManage && <button onClick={() => startRenaming(m)} className="text-muted-foreground hover:text-primary" title="Rename" data-testid={`model-name-edit-${m.id}`}>
                                   <Pencil className="w-3 h-3" />
-                                </button>
+                                </button>}
                               </>
                             )}
                             {m.is_active && (
@@ -426,7 +436,7 @@ export default function ModelDeploy() {
                             <span className="text-primary font-bold">mAP@50 {((m.final_mAP || 0) * 100).toFixed(1)}%</span>
                             <span className="text-muted-foreground">P {((m.precision || 0) * 100).toFixed(1)}%</span>
                             <span className="text-muted-foreground">R {((m.recall || 0) * 100).toFixed(1)}%</span>
-                            {!m.is_active && (
+                            {!m.is_active && canActivate(m) && (
                               <Button
                                 size="sm"
                                 onClick={() => activateModel(m.id)}
@@ -443,7 +453,7 @@ export default function ModelDeploy() {
                         {m.status === "training" && (
                           <>
                             <Loader2 className="w-4 h-4 text-primary animate-spin" />
-                            <Button
+                            {canManage && <Button
                               size="sm"
                               variant="outline"
                               onClick={() => cancelTraining(m.id)}
@@ -451,11 +461,11 @@ export default function ModelDeploy() {
                               data-testid={`cancel-btn-${m.id}`}
                             >
                               Cancel
-                            </Button>
+                            </Button>}
                           </>
                         )}
                         {m.status === "failed" && <AlertCircle className="w-4 h-4 text-destructive" title={m.error} />}
-                        {!["queued", "preparing", "training"].includes(m.status) && (
+                        {canManage && !["queued", "preparing", "training"].includes(m.status) && (
                           <Button
                             size="sm"
                             variant="outline"

@@ -239,7 +239,7 @@ def register(s):
         for r in await db.images.aggregate([{"$group": {"_id": {"p": "$project_id", "st": "$review_status"}, "n": {"$sum": 1}}}]).to_list(None):
             status[r["_id"]["p"]][r["_id"].get("st") or "unassigned"] = r["n"]
         annotated = {r["_id"]: r["n"] for r in await db.images.aggregate(
-            [{"$match": {"annotated": True}}, {"$group": {"_id": "$project_id", "n": {"$sum": 1}}}]).to_list(None)}
+            [{"$match": {"review_status": "approved"}}, {"$group": {"_id": "$project_id", "n": {"$sum": 1}}}]).to_list(None)}
         teams = {t["id"]: t["name"] for t in await db.teams.find({}, {"id": 1, "name": 1}).to_list(None)}
         active_models = {m["project_id"]: m for m in await db.models.find(
             {"is_active": True, "status": "trained"}, {"_id": 0, "project_id": 1, "name": 1, "model_arch": 1, "final_mAP": 1}).to_list(None)}
@@ -282,7 +282,7 @@ def register(s):
         st = {r["_id"] or "unassigned": r["n"] for r in await db.images.aggregate(
             [{"$match": {"project_id": pid}}, {"$group": {"_id": "$review_status", "n": {"$sum": 1}}}]).to_list(None)}
         total = sum(st.values())
-        annotated = await db.images.count_documents({"project_id": pid, "annotated": True})
+        annotated = await db.images.count_documents({"project_id": pid, "review_status": "approved"})
         reviews = await _review_stats(start, end_excl, project=pid)
         contributors = [{"user_id": u, "name": users[u]["name"], "frames": n,
                          "approved": reviews[u]["approved"] if u in reviews else 0,

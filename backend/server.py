@@ -444,8 +444,9 @@ async def _project_out(pid: str):
         return t["name"] if t else ""
 
     # Independent lookups run concurrently instead of sequentially.
-    image_count, annotated_count, team_name, active_model = await asyncio.gather(
+    image_count, annotated_count, labeled_count, team_name, active_model = await asyncio.gather(
         db.images.count_documents({"project_id": pid}),
+        db.images.count_documents({"project_id": pid, **APPROVED}),
         db.images.count_documents({"project_id": pid, "annotated": True}),
         _team_name(),
         # Same lookup _auto_label_router uses to pick a provider - kept identical
@@ -463,7 +464,8 @@ async def _project_out(pid: str):
         "task_type": p.get("task_type", "object_detection"),
         "classes": p.get("classes", []),
         "image_count": image_count,
-        "annotated_count": annotated_count,
+        "annotated_count": annotated_count,  # approved by a reviewer
+        "labeled_count": labeled_count,  # has boxes, review may still be pending
         "team_id": p.get("team_id"),
         "team_name": team_name,
         "settings": {
@@ -502,6 +504,63 @@ async def _project_access_check(pid: str, user_id: str, roles: Optional[List[str
     if p.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Not project owner")
     return p
+
+
+LOCKED_STATUSES = ("submitted", "approved")
+# An image only counts as annotated/done once a reviewer has approved it.
+APPROVED = {"review_status": "approved"}
+
+
+async def _role_in_project(project: dict, user_id: str) -> str:
+    """Caller's team role for this project; legacy team-less projects belong to their owner."""
+    tid = project.get("team_id")
+    if not tid:
+        return "owner"
+    m = await _get_membership(tid, user_id)
+    return m["role"] if m else ""
+
+
+async def _require_not_reviewer(pid: str, user_id: str) -> dict:
+    """Project access for anything that changes images; reviewers can only review."""
+    p = await _project_access_check(pid, user_id)
+    if await _role_in_project(p, user_id) == "reviewer":
+        raise HTTPException(status_code=403, detail="Reviewers can review but not change images")
+    return p
+
+
+async def _image_edit_check(img: dict, user_id: str) -> str:
+    """Raise unless `user_id` may change this image's annotations right now; returns their role.
+
+    Annotators/members: only images assigned to them while `assigned` or `rejected`.
+    Owner/admin: also unassigned images (the caller claims it on save). Nobody edits an image
+    that is waiting for review or already approved.
+    """
+    p = await _project_access_check(img["project_id"], user_id)
+    role = await _role_in_project(p, user_id)
+    if role == "reviewer":
+        raise HTTPException(status_code=403, detail="Reviewers can review but not edit annotations")
+    status = img.get("review_status") or "unassigned"
+    if status == "submitted":
+        raise HTTPException(status_code=409, detail="Image is waiting for review and is locked")
+    if status == "approved":
+        raise HTTPException(status_code=409, detail="Image is approved and locked")
+    assignee = img.get("assigned_to")
+    if role in ("owner", "admin"):
+        if assignee not in (None, "", user_id):
+            raise HTTPException(status_code=403, detail="Image is assigned to another team member")
+    else:
+        if assignee != user_id:
+            raise HTTPException(status_code=403, detail="This image is not assigned to you")
+        if status not in ("assigned", "rejected"):
+            raise HTTPException(status_code=409, detail="Image is not open for annotation")
+    return role
+
+
+async def _has_other_reviewer(team_id: str, user_id: str) -> bool:
+    return await db.team_members.count_documents({
+        "team_id": team_id, "status": "active", "role": {"$in": ["owner", "admin", "reviewer"]},
+        "user_id": {"$ne": user_id},
+    }) > 0
 
 
 async def _log_activity(project_id: str, user_id: str, action: str, meta: dict = None):
@@ -674,7 +733,7 @@ async def upload_video(
     background: BackgroundTasks = None,
     current=Depends(get_current_user),
 ):
-    await _verify_project(pid, current["id"])
+    await _require_not_reviewer(pid, current["id"])
     ext = (file.filename.rsplit(".", 1)[-1] if "." in file.filename else "mp4").lower()
     if ext not in ["mp4", "mov", "webm", "avi", "mkv"]:
         raise HTTPException(status_code=400, detail="Unsupported video type")
@@ -739,7 +798,7 @@ async def delete_video(vid: str, current=Depends(get_current_user)):
     v = await db.videos.find_one({"id": vid})
     if not v:
         raise HTTPException(status_code=404, detail="Not found")
-    await _project_access_check(v["project_id"], current["id"])
+    await _project_access_check(v["project_id"], current["id"], roles=["owner", "admin"])
     await db.videos.delete_one({"id": vid})
     return {"ok": True}
 
@@ -750,7 +809,7 @@ async def auto_label(img_id: str, current=Depends(get_current_user)):
     img = await db.images.find_one({"id": img_id})
     if not img:
         raise HTTPException(status_code=404, detail="Not found")
-    await _project_access_check(img["project_id"], current["id"])
+    await _require_not_reviewer(img["project_id"], current["id"])
     try:
         data, ct = await asyncio.to_thread(get_object, img["storage_path"])
     except Exception as e:
@@ -764,7 +823,7 @@ async def auto_label(img_id: str, current=Depends(get_current_user)):
 
 
 # ----------------- Batch Auto-Label ----------------- #
-async def _batch_autolabel_job(job_id: str, project_id: str, image_ids: List[str]):
+async def _batch_autolabel_job(job_id: str, project_id: str, image_ids: List[str], user_id: Optional[str] = None):
     """Iterate images and run auto-label via router (uses trained model if available)."""
     total = len(image_ids)
     processed = 0
@@ -794,10 +853,21 @@ async def _batch_autolabel_job(job_id: str, project_id: str, image_ids: List[str
                 skipped += 1
             if boxes:
                 existing = img.get("annotations", [])
-                await db.images.update_one(
-                    {"id": img_id},
-                    {"$set": {"annotations": existing + boxes, "annotated": True}},
+                changes = {"annotations": existing + boxes, "annotated": True}
+                if user_id:
+                    changes["annotated_by"] = user_id
+                    changes["annotated_at"] = datetime.now(timezone.utc).isoformat()
+                    if not img.get("assigned_to"):  # owner/admin labeling an unassigned image claims it
+                        changes["assigned_to"] = user_id
+                        changes["review_status"] = "assigned"
+                # Never touch an image that was submitted for review while the job was running.
+                res = await db.images.update_one(
+                    {"id": img_id, "review_status": {"$nin": list(LOCKED_STATUSES)}}, {"$set": changes},
                 )
+                if res.matched_count == 0:
+                    skipped += 1
+                    processed += 1
+                    continue
                 # Merge class labels
                 await db.projects.update_one(
                     {"id": project_id},
@@ -827,8 +897,16 @@ async def batch_auto_label(
     background: BackgroundTasks,
     current=Depends(get_current_user),
 ):
-    await _verify_project(pid, current["id"])
+    p = await _require_not_reviewer(pid, current["id"])
+    role = await _role_in_project(p, current["id"])
     query = {"project_id": pid}
+    # Only images this person could edit by hand: never ones under review or approved.
+    if role in ("owner", "admin"):
+        query["review_status"] = {"$in": ["unassigned", "assigned", "rejected", None]}
+        query["assigned_to"] = {"$in": [None, current["id"]]}
+    else:
+        query["assigned_to"] = current["id"]
+        query["review_status"] = {"$in": ["assigned", "rejected"]}
     if payload.only_unlabeled:
         query["annotated"] = False
     images = await db.images.find(query, {"id": 1, "_id": 0}).to_list(5000)
@@ -860,7 +938,7 @@ async def batch_auto_label(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.batch_jobs.insert_one(doc)
-    background.add_task(_batch_autolabel_job, job_id, pid, image_ids)
+    background.add_task(_batch_autolabel_job, job_id, pid, image_ids, current["id"])
     doc.pop("_id", None)
     return doc
 
@@ -954,7 +1032,10 @@ async def bulk_assign_images(pid: str, payload: BulkAssignIn, current=Depends(ge
         update["task_notes"] = payload.notes
     if not update:
         raise HTTPException(status_code=400, detail="Nothing to update")
-    result = await db.images.update_many({"id": {"$in": payload.image_ids}, "project_id": pid}, {"$set": update})
+    flt = {"id": {"$in": payload.image_ids}, "project_id": pid}
+    if "review_status" in update:
+        flt["review_status"] = {"$nin": list(LOCKED_STATUSES)}  # don't reset images under review / approved
+    result = await db.images.update_many(flt, {"$set": update})
     await _log_activity(pid, current["id"], "bulk_assigned", {"count": result.modified_count, "user_id": payload.user_id})
     if payload.user_id:
         await _notify(payload.user_id, "image_assigned", f"{result.modified_count} image(s) assigned to you in '{p['name']}'", project_id=pid)
@@ -966,7 +1047,7 @@ async def update_image_task(img_id: str, payload: TaskMetaIn, current=Depends(ge
     img = await db.images.find_one({"id": img_id})
     if not img:
         raise HTTPException(status_code=404, detail="Not found")
-    await _project_access_check(img["project_id"], current["id"])
+    await _project_access_check(img["project_id"], current["id"], roles=["owner", "admin"])
     update = {}
     if payload.priority is not None:
         update["priority"] = payload.priority
@@ -991,7 +1072,7 @@ async def project_dashboard(pid: str, current=Depends(get_current_user)):
     counts = {}
     for status in ["unassigned", "assigned", "submitted", "approved", "rejected"]:
         counts[status] = await db.images.count_documents({"project_id": pid, "review_status": status})
-    annotated = await db.images.count_documents({"project_id": pid, "annotated": True})
+    annotated = await db.images.count_documents({"project_id": pid, **APPROVED})
     # Per-member perf
     assignments = await db.project_assignments.find({"project_id": pid}).to_list(500)
     project = await db.projects.find_one({"id": pid}, {"team_id": 1})
@@ -1046,7 +1127,7 @@ async def team_dashboard(tid: str, current=Depends(get_current_user)):
     for p in projects:
         pid = p["id"]
         imgs = await db.images.count_documents({"project_id": pid})
-        ann = await db.images.count_documents({"project_id": pid, "annotated": True})
+        ann = await db.images.count_documents({"project_id": pid, **APPROVED})
         approved = await db.images.count_documents({"project_id": pid, "review_status": "approved"})
         submitted = await db.images.count_documents({"project_id": pid, "review_status": "submitted"})
         total_images += imgs
@@ -1070,7 +1151,7 @@ async def team_dashboard(tid: str, current=Depends(get_current_user)):
 @api_router.post("/projects/{pid}/versions")
 async def create_version(pid: str, payload: VersionCreate, current=Depends(get_current_user)):
     await _verify_project(pid, current["id"])
-    images = await db.images.find({"project_id": pid, "annotated": True}, {"_id": 0}).to_list(2000)
+    images = await db.images.find({"project_id": pid, **APPROVED, "annotated": True}, {"_id": 0}).to_list(2000)
     vid = str(uuid.uuid4())
     doc = {
         "id": vid,
@@ -1104,7 +1185,7 @@ async def export_dataset(
     current=Depends(get_current_user),
 ):
     project = await _verify_project(pid, current["id"])
-    images = await db.images.find({"project_id": pid, "annotated": True}, {"_id": 0}).to_list(2000)
+    images = await db.images.find({"project_id": pid, **APPROVED, "annotated": True}, {"_id": 0}).to_list(2000)
     classes = project.get("classes", [])
     label_to_idx = {c: i for i, c in enumerate(classes)}
 
@@ -1323,7 +1404,7 @@ async def _build_split_dataset_dir(pid: str, project: dict, train_pct: float = 0
     hardcodes exactly this shape. Used both by export_dataset's "split"
     format (manual download) and, from M4 onward, the pipeline's own
     uploading_data stage (SCP'd directly, no ZIP involved)."""
-    images = await db.images.find({"project_id": pid, "annotated": True}, {"_id": 0}).to_list(2000)
+    images = await db.images.find({"project_id": pid, **APPROVED, "annotated": True}, {"_id": 0}).to_list(2000)
     classes = project.get("classes", [])
     cls_to_idx = {c: i for i, c in enumerate(classes)}
 
@@ -1384,7 +1465,7 @@ async def _build_split_dataset_dir(pid: str, project: dict, train_pct: float = 0
 # ----------------- Training (Simulated) ----------------- #
 @api_router.post("/projects/{pid}/train")
 async def train_model(pid: str, payload: TrainRequest, current=Depends(get_current_user)):
-    await _verify_project(pid, current["id"])
+    await _project_access_check(pid, current["id"], roles=["owner", "admin"])
     version = await db.versions.find_one({"id": payload.version_id, "project_id": pid})
     if not version:
         raise HTTPException(status_code=404, detail="Version not found")
@@ -1484,21 +1565,8 @@ def _train_yolo_sync(job_id: str, project_id: str, model_arch: str, epochs: int)
             "review_status": "approved",
             "annotations.0": {"$exists": True},
         }))
-        # Also include annotated-but-not-yet-reviewed if too few approved
         if len(docs) < MIN_TRAINING_IMAGES:
-            extra = list(sync_db.images.find({
-                "project_id": project_id,
-                "annotated": True,
-                "review_status": {"$ne": "rejected"},
-                "annotations.0": {"$exists": True},
-            }))
-            seen = set(d["id"] for d in docs)
-            for e in extra:
-                if e["id"] not in seen:
-                    docs.append(e); seen.add(e["id"])
-
-        if len(docs) < MIN_TRAINING_IMAGES:
-            raise Exception(f"Need at least {MIN_TRAINING_IMAGES} labeled images (have {len(docs)})")
+            raise Exception(f"Need at least {MIN_TRAINING_IMAGES} approved images (have {len(docs)})")
 
         sync_db.models.update_one({"id": job_id}, {"$set": {"status": "preparing", "training_image_count": len(docs)}})
 

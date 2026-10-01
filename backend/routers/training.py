@@ -25,14 +25,14 @@ def register(s):
         model_arch: str = "yolov8n",
         current=Depends(get_current_user),
     ):
-        await s._project_access_check(pid, current["id"], roles=["owner", "admin"])
+        await s._require_not_reviewer(pid, current["id"])
         if epochs < 0 or epochs > 200:
             raise HTTPException(status_code=400, detail="epochs must be between 0 (auto) and 200")
         approved = await db.images.count_documents({"project_id": pid, "review_status": "approved", "annotations.0": {"$exists": True}})
-        annotated = await db.images.count_documents({"project_id": pid, "annotated": True, "review_status": {"$ne": "rejected"}, "annotations.0": {"$exists": True}})
-        total_eligible = max(approved, annotated)
+        annotated = approved  # only reviewed-and-approved images are used for training
+        total_eligible = approved
         if total_eligible < s.MIN_TRAINING_IMAGES:
-            raise HTTPException(status_code=400, detail=f"Need at least {s.MIN_TRAINING_IMAGES} labeled images (have {total_eligible})")
+            raise HTTPException(status_code=400, detail=f"Need at least {s.MIN_TRAINING_IMAGES} approved images (have {total_eligible})")
         effective_epochs = s.auto_scale_epochs(total_eligible, requested=epochs if epochs > 0 else None)
         mid = str(uuid.uuid4())
         doc = {
@@ -41,6 +41,7 @@ def register(s):
             "model_arch": model_arch, "epochs": effective_epochs,
             "epochs_requested": epochs, "epochs_auto_scaled": epochs == 0,
             "status": "queued", "is_active": False,
+            "purpose": "assist",  # drives auto-label only; production deploys go through the pipeline
             "training_image_count": total_eligible,
             "progress": 0, "current_epoch": 0,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -89,7 +90,11 @@ def register(s):
         m = await db.models.find_one({"id": mid})
         if not m:
             raise HTTPException(status_code=404, detail="Not found")
-        await s._project_access_check(m["project_id"], current["id"], roles=["owner", "admin"])
+        p = await s._project_access_check(m["project_id"], current["id"])
+        role = await s._role_in_project(p, current["id"])
+        purpose = m.get("purpose") or ("production" if m.get("source") else "assist")
+        if role not in ("owner", "admin") and not (m.get("user_id") == current["id"] and purpose == "assist" and role != "reviewer"):
+            raise HTTPException(status_code=403, detail="Only owners/admins, or the person who trained an assist model, can activate it")
         if m.get("type") == "real" and m.get("status") != "trained":
             raise HTTPException(status_code=400, detail="Model not yet trained")
         if m.get("type") == "real" and not m.get("weights_path"):
@@ -124,8 +129,8 @@ def register(s):
     async def training_plan_preview(pid: str, current=Depends(get_current_user)):
         await s._project_access_check(pid, current["id"])
         approved = await db.images.count_documents({"project_id": pid, "review_status": "approved", "annotations.0": {"$exists": True}})
-        annotated = await db.images.count_documents({"project_id": pid, "annotated": True, "review_status": {"$ne": "rejected"}, "annotations.0": {"$exists": True}})
-        total_eligible = max(approved, annotated)
+        annotated = approved  # only reviewed-and-approved images are used for training
+        total_eligible = approved
         epochs = s.auto_scale_epochs(total_eligible)
         est_seconds = int(total_eligible * epochs * 2)
         return {

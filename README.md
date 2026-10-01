@@ -116,6 +116,24 @@ python scripts/create_manager.py --email you@tneuralai.com --name "Your Name"
 
 Tests: `pytest backend/tests/test_manager_dashboard.py -n 0` runs against a throwaway database and does not need a running backend.
 
+## Annotation and review workflow
+
+The server enforces these rules (the UI mirrors them):
+
+| Role | Can do |
+|---|---|
+| Annotator, member | Annotate only images assigned to them, while the image is `assigned` or `rejected`, then submit. Start local training of an annotation-assist model and activate their own. |
+| Reviewer | Approve or reject submitted images (a note is required to reject). Cannot edit annotations, upload, auto-label or delete. |
+| Owner, admin | Assign work, upload, delete, manage models, and run the Deploy Pipeline. They can annotate unassigned images (the image is assigned to them on save) but cannot review their own work unless nobody else could (solo workspace). |
+
+An image moves `unassigned -> assigned -> submitted -> approved`. A rejected image goes back to its annotator, who re-annotates and resubmits. Submitted and approved images are locked.
+
+An image counts as **annotated** only once it is **approved**. Project counts, dashboards, dataset versions, exports, training and the Deploy Pipeline all use approved images only.
+
+Annotators train an *assist* model that only drives auto-label. Production deploys go through the Deploy Pipeline, which only owners and admins can run.
+
+To see how many existing images stop counting until reviewed: `python scripts/backfill_review_status.py` (dry run).
+
 ## Frontend setup
 
 ```bash

@@ -38,7 +38,7 @@ export default function Auth() {
       const { data } = await api.post(url, payload);
       setAuth(data.token, data.user);
       toast.success(mode === "register" ? "Account created" : "Welcome back");
-      navigate(mode === "manager" ? "/manager" : "/dashboard");
+      navigate(data.user.role === "manager" ? "/manager" : "/dashboard");
     } catch (err) {
       toast.error(err.response?.data?.detail || "Authentication failed");
     } finally {
