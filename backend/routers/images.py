@@ -125,7 +125,7 @@ def register(s):
             "reviewed_by": current["id"],
             "reviewed_at": datetime.now(timezone.utc).isoformat(),
         }})
-        await s._log_activity(img["project_id"], current["id"], f"image_{payload.decision}d", {"image_id": img_id, "notes": payload.notes or ""})
+        await s._log_activity(img["project_id"], current["id"], "image_approved" if payload.decision == "approve" else "image_rejected", {"image_id": img_id, "notes": payload.notes or ""})
         if img.get("assigned_to") and img["assigned_to"] != current["id"]:
             kind = "review_completed" if payload.decision == "approve" else "rejected"
             title = "Your annotation was approved" if payload.decision == "approve" else "Your annotation was rejected"
@@ -167,7 +167,10 @@ def register(s):
             raise HTTPException(status_code=404, detail="Not found")
         await s._project_access_check(img["project_id"], current["id"])
         boxes = [b.model_dump() for b in payload.boxes]
-        await db.images.update_one({"id": img_id}, {"$set": {"annotations": boxes, "annotated": len(boxes) > 0}})
+        await db.images.update_one({"id": img_id}, {"$set": {
+            "annotations": boxes, "annotated": len(boxes) > 0,
+            "annotated_by": current["id"], "annotated_at": datetime.now(timezone.utc).isoformat(),
+        }})
         project = await db.projects.find_one({"id": img["project_id"]}, {"classes": 1})
         existing = set(project.get("classes", []))
         new_labels = {b["label"] for b in boxes} - existing

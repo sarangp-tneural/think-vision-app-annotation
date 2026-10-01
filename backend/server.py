@@ -38,6 +38,8 @@ EMERGENT_LLM_KEY = os.environ["EMERGENT_LLM_KEY"]
 APP_NAME = os.environ.get("APP_NAME", "visionforge")  # kept for storage-path back-compat
 BRAND_NAME = os.environ.get("BRAND_NAME", "ThinkVision")
 ALLOWED_EMAIL_DOMAIN = os.environ.get("ALLOWED_EMAIL_DOMAIN", "").strip().lower()
+# Managers must always be company addresses, even when open registration is on.
+MANAGER_EMAIL_DOMAIN = ALLOWED_EMAIL_DOMAIN or "tneuralai.com"
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev")
 APP_URL = os.environ.get("APP_URL", "")
@@ -215,6 +217,10 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+class ManagerLogin(BaseModel):
+    email: EmailStr
+    password: str
+
 class UserOut(BaseModel):
     id: str
     email: str
@@ -346,6 +352,13 @@ async def get_current_user(authorization: Optional[str] = Header(None), auth: Op
         await _activate_pending_invites(user["id"], user["email"])
     except Exception:
         pass
+    return user
+
+
+async def require_manager(user=Depends(get_current_user)):
+    """Global, read-only company role. Managers are not members of any team."""
+    if user.get("role") != "manager":
+        raise HTTPException(status_code=403, detail="Manager access required")
     return user
 
 
@@ -1874,6 +1887,8 @@ from routers import collaboration as _collab_router
 from routers import projects as _projects_router
 from routers import images as _images_router
 from routers import deployment as _deployment_router
+from routers import work_logs as _work_logs_router
+from routers import manager as _manager_router
 _training_router.register(_this_module)
 _al_router.register(_this_module)
 _auth_router.register(_this_module)
@@ -1882,6 +1897,8 @@ _collab_router.register(_this_module)
 _projects_router.register(_this_module)
 _images_router.register(_this_module)
 _deployment_router.register(_this_module)
+_work_logs_router.register(_this_module)
+_manager_router.register(_this_module)
 api_router.include_router(_training_router.router)
 api_router.include_router(_al_router.router)
 api_router.include_router(_auth_router.router)
@@ -1890,6 +1907,8 @@ api_router.include_router(_collab_router.router)
 api_router.include_router(_projects_router.router)
 api_router.include_router(_images_router.router)
 api_router.include_router(_deployment_router.router)
+api_router.include_router(_work_logs_router.router)
+api_router.include_router(_manager_router.router)
 
 app.include_router(api_router)
 
@@ -1914,6 +1933,10 @@ async def startup():
         await db.images.create_index([("project_id", 1), ("review_status", 1), ("created_at", -1)])
         await db.images.create_index([("assigned_to", 1)])
         await db.images.create_index([("storage_path", 1)])
+        await db.images.create_index([("annotated_by", 1), ("annotated_at", -1)])
+        await db.activity_log.create_index([("user_id", 1), ("created_at", -1)])
+        await db.work_logs.create_index([("user_id", 1), ("date", -1)])
+        await db.work_logs.create_index([("project_name", 1), ("date", -1)])
         await db.activity_log.create_index([("project_id", 1), ("created_at", -1)])
         await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
         await db.team_members.create_index([("team_id", 1), ("user_id", 1)])

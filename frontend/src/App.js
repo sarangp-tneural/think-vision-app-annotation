@@ -12,10 +12,25 @@ import Teams from "@/pages/Teams";
 import TeamDetail from "@/pages/TeamDetail";
 import TeamDashboard from "@/pages/TeamDashboard";
 import Activity from "@/pages/Activity";
-import { getToken } from "@/lib/api";
+import MyWorkLog from "@/pages/MyWorkLog";
+import ManagerLayout from "@/pages/manager/ManagerLayout";
+import ManagerOverview from "@/pages/manager/Overview";
+import ManagerPeople from "@/pages/manager/People";
+import ManagerPersonDetail from "@/pages/manager/PersonDetail";
+import ManagerProjects from "@/pages/manager/Projects";
+import ManagerProjectDetail from "@/pages/manager/ProjectDetail";
+import ManagerWorkLog from "@/pages/manager/WorkLog";
+import { getToken, getUser } from "@/lib/api";
 
 const Protected = ({ children }) => {
   if (!getToken()) return <Navigate to="/auth" replace />;
+  return children;
+};
+
+// Server enforces the role on every /manager API call; this only keeps the UI tidy.
+const ManagerProtected = ({ children }) => {
+  if (!getToken()) return <Navigate to="/auth" replace />;
+  if (getUser()?.role !== "manager") return <Navigate to="/dashboard" replace />;
   return children;
 };
 
@@ -27,6 +42,15 @@ function App() {
           <Route path="/" element={<Landing />} />
           <Route path="/auth" element={<Auth />} />
           <Route path="/dashboard" element={<Protected><Dashboard /></Protected>} />
+          <Route path="/work-log" element={<Protected><MyWorkLog /></Protected>} />
+          <Route path="/manager" element={<ManagerProtected><ManagerLayout /></ManagerProtected>}>
+            <Route index element={<ManagerOverview />} />
+            <Route path="people" element={<ManagerPeople />} />
+            <Route path="people/:uid" element={<ManagerPersonDetail />} />
+            <Route path="projects" element={<ManagerProjects />} />
+            <Route path="projects/:pid" element={<ManagerProjectDetail />} />
+            <Route path="work-log" element={<ManagerWorkLog />} />
+          </Route>
           <Route path="/teams" element={<Protected><Teams /></Protected>} />
           <Route path="/teams/:tid" element={<Protected><TeamDetail /></Protected>} />
           <Route path="/teams/:tid/dashboard" element={<Protected><TeamDashboard /></Protected>} />

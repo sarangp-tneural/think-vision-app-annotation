@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { api, setAuth, getToken } from "@/lib/api";
+import { MANAGER } from "@/constants/testIds";
 import { ArrowRight, Terminal } from "lucide-react";
 
 export default function Auth() {
@@ -18,7 +19,10 @@ export default function Auth() {
   const [allowedDomain, setAllowedDomain] = useState(null);
 
   useEffect(() => {
-    if (getToken()) navigate("/dashboard");
+    if (getToken()) {
+      try { navigate(JSON.parse(localStorage.getItem("vf_user"))?.role === "manager" ? "/manager" : "/dashboard"); }
+      catch { navigate("/dashboard"); }
+    }
     // Fetch domain restriction hint (public endpoint)
     api.get("/system/versions").then(({ data }) => {
       if (data?.allowed_email_domain) setAllowedDomain(data.allowed_email_domain);
@@ -29,12 +33,12 @@ export default function Auth() {
     e.preventDefault();
     setLoading(true);
     try {
-      const url = mode === "login" ? "/auth/login" : "/auth/register";
-      const payload = mode === "login" ? { email, password } : { email, password, name };
+      const url = mode === "manager" ? "/auth/manager-login" : mode === "login" ? "/auth/login" : "/auth/register";
+      const payload = mode === "manager" ? { email, password } : mode === "login" ? { email, password } : { email, password, name };
       const { data } = await api.post(url, payload);
       setAuth(data.token, data.user);
-      toast.success(mode === "login" ? "Welcome back" : "Account created");
-      navigate("/dashboard");
+      toast.success(mode === "register" ? "Account created" : "Welcome back");
+      navigate(mode === "manager" ? "/manager" : "/dashboard");
     } catch (err) {
       toast.error(err.response?.data?.detail || "Authentication failed");
     } finally {
@@ -87,13 +91,13 @@ export default function Auth() {
       <div className="flex-1 flex items-center justify-center p-6 md:p-16">
         <div className="w-full max-w-md fade-in-up">
           <div className="text-[10px] uppercase tracking-[0.3em] text-primary mb-4">
-            // {mode === "login" ? "Access console" : "Create account"}
+            // {mode === "manager" ? "Manager console" : mode === "login" ? "Access console" : "Create account"}
           </div>
           <h1 className="font-heading text-3xl md:text-4xl font-bold mb-2 tracking-tight">
-            {mode === "login" ? "Welcome back." : "Get started."}
+            {mode === "register" ? "Get started." : "Welcome back."}
           </h1>
           <p className="text-sm text-muted-foreground mb-10">
-            {mode === "login" ? "Continue where you left off." : "No credit card required."}
+            {mode === "manager" ? "Company overview of work by person and project." : mode === "login" ? "Continue where you left off." : "No credit card required."}
           </p>
 
           <form onSubmit={submit} className="space-y-5">
@@ -119,12 +123,12 @@ export default function Auth() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 className="rounded-sm bg-transparent border-[#27272A] h-11 focus-visible:ring-primary focus-visible:ring-2"
-                placeholder={allowedDomain ? `you@${allowedDomain}` : "you@company.com"}
-                data-testid="auth-email-input"
+                placeholder={mode === "manager" ? "you@tneuralai.com" : allowedDomain ? `you@${allowedDomain}` : "you@company.com"}
+                data-testid={mode === "manager" ? MANAGER.emailInput : "auth-email-input"}
               />
-              {allowedDomain && (
+              {(allowedDomain || mode === "manager") && (
                 <div className="text-[10px] text-muted-foreground mt-1.5" data-testid="auth-domain-hint">
-                  Restricted to <span className="text-primary">@{allowedDomain}</span> addresses
+                  Restricted to <span className="text-primary">@{allowedDomain || "tneuralai.com"}</span> addresses
                 </div>
               )}
             </div>
@@ -148,19 +152,25 @@ export default function Auth() {
               className="w-full rounded-sm bg-primary text-black hover:bg-cyan-400 h-11 text-xs uppercase tracking-[0.2em] font-bold"
               data-testid="auth-submit-btn"
             >
-              {loading ? "Processing..." : (mode === "login" ? "Sign In" : "Create Account")}
+              {loading ? "Processing..." : (mode === "register" ? "Create Account" : "Sign In")}
               {!loading && <ArrowRight className="w-4 h-4 ml-2" />}
             </Button>
           </form>
 
           <div className="mt-8 pt-8 border-t border-[#27272A] text-center">
             <button
-              onClick={() => setMode(mode === "login" ? "register" : "login")}
+              onClick={() => setMode(mode === "register" ? "login" : "register")}
               className="text-xs text-muted-foreground hover:text-primary transition-colors"
               data-testid="auth-toggle-mode-btn"
             >
-              {mode === "login" ? "Don't have an account? Sign up →" : "Already have an account? Sign in →"}
+              {mode === "register" ? "Already have an account? Sign in →" : "Don't have an account? Sign up →"}
             </button>
+            <div className="mt-4">
+              <button onClick={() => setMode(mode === "manager" ? "login" : "manager")}
+                className="text-xs text-muted-foreground hover:text-primary transition-colors" data-testid={MANAGER.loginTab}>
+                {mode === "manager" ? "← Back to team sign in" : "Company manager? Sign in here →"}
+              </button>
+            </div>
           </div>
         </div>
       </div>

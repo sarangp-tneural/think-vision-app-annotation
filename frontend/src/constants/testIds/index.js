@@ -14,3 +14,4 @@
 export * from './auth';
 export * from './home';
 export * from './deployPipeline';
+export * from './manager';

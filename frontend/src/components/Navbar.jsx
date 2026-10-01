@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { LogOut, LayoutGrid, User as UserIcon, Users } from "lucide-react";
+import { LogOut, LayoutGrid, User as UserIcon, Users, ClipboardList } from "lucide-react";
 import { clearAuth, getUser } from "@/lib/api";
 import NotificationsBell from "@/components/NotificationsBell";
 
@@ -45,6 +45,9 @@ export default function Navbar({ crumbs }) {
           </Link>
           <Link to="/teams" className="text-xs uppercase tracking-[0.2em] text-muted-foreground hover:text-primary transition-colors flex items-center gap-2" data-testid="navbar-teams-link">
             <Users className="w-4 h-4" /> Teams
+          </Link>
+          <Link to="/work-log" className="text-xs uppercase tracking-[0.2em] text-muted-foreground hover:text-primary transition-colors flex items-center gap-2" data-testid="navbar-worklog-link">
+            <ClipboardList className="w-4 h-4" /> Work log
           </Link>
           <NotificationsBell />
           {user && (

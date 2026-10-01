@@ -44,6 +44,16 @@ def register(s):
         await s._activate_pending_invites(user["id"], user["email"])
         return {"token": s.create_token(user["id"]), "user": {"id": user["id"], "email": user["email"], "name": user["name"]}}
 
+    @router.post("/auth/manager-login")
+    async def auth_manager_login(payload: s.ManagerLogin):
+        email = payload.email.lower()
+        user = None
+        if email.endswith("@" + s.MANAGER_EMAIL_DOMAIN):
+            user = await db.users.find_one({"email": email, "role": "manager"})
+        if not user or not s.verify_password(payload.password, user["password"]):
+            raise HTTPException(status_code=400, detail="Invalid credentials")
+        return {"token": s.create_token(user["id"]), "user": {"id": user["id"], "email": user["email"], "name": user["name"], "role": "manager"}}
+
     @router.get("/auth/me")
     async def auth_me(current=Depends(get_current_user)):
-        return {"id": current["id"], "email": current["email"], "name": current["name"]}
+        return {"id": current["id"], "email": current["email"], "name": current["name"], "role": current.get("role", "user")}
