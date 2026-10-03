@@ -3,7 +3,7 @@ import { useParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import Navbar from "@/components/Navbar";
 import { toast } from "sonner";
-import { Activity as ActivityIcon, UserPlus, UserMinus, Image as ImageIcon, CheckCircle2, XCircle, Send, MessageSquare, Sparkles, GitBranch } from "lucide-react";
+import { Activity as ActivityIcon, UserPlus, UserMinus, Image as ImageIcon, CheckCircle2, XCircle, Send, MessageSquare, Sparkles, GitBranch, Pencil } from "lucide-react";
 
 const ACTION_ICONS = {
   project_assigned: UserPlus,
@@ -19,6 +19,7 @@ const ACTION_ICONS = {
   comment_added: MessageSquare,
   auto_label: Sparkles,
   version_created: GitBranch,
+  class_renamed: Pencil,
 };
 
 export default function Activity() {

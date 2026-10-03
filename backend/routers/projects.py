@@ -139,6 +139,42 @@ def register(s):
         p = await db.projects.find_one({"id": pid}, {"_id": 0, "classes": 1})
         return {"classes": p.get("classes", [])}
 
+    @router.patch("/projects/{pid}/classes/{label}")
+    async def rename_class(pid: str, label: str, payload: dict, current=Depends(get_current_user)):
+        """Rename a class and relabel every box that uses it. If the new name already exists the
+        two classes are merged. Review status and authorship of the images are left untouched."""
+        p = await s._project_access_check(pid, current["id"], roles=["owner", "admin"])
+        new = str(payload.get("new_name") or "").strip().lower()[:40]
+        if not new:
+            raise HTTPException(status_code=400, detail="New name required")
+        if new == label:
+            raise HTTPException(status_code=400, detail="New name is the same as the old one")
+        classes = p.get("classes", [])
+        if label not in classes:
+            raise HTTPException(status_code=404, detail="Class not found")
+        merged = new in classes
+        if merged:
+            res = await db.projects.update_one({"id": pid, "classes": classes}, {"$pull": {"classes": label}})
+        else:
+            # Keep the old position so class indices (export, training, active model) don't move.
+            renamed = [new if c == label else c for c in classes]
+            res = await db.projects.update_one({"id": pid, "classes": classes}, {"$set": {"classes": renamed}})
+        if res.matched_count == 0:
+            raise HTTPException(status_code=409, detail="Classes changed while renaming, try again")
+        images = await db.images.update_many(
+            {"project_id": pid, "annotations.label": label},
+            {"$set": {"annotations.$[a].label": new}},
+            array_filters=[{"a.label": label}],
+        )
+        allowed = (p.get("settings") or {}).get("gemini_allowed_classes")
+        if isinstance(allowed, list) and label in allowed:
+            moved = list(dict.fromkeys(new if c == label else c for c in allowed))
+            await db.projects.update_one({"id": pid}, {"$set": {"settings.gemini_allowed_classes": moved}})
+        await s._log_activity(pid, current["id"], "class_renamed",
+                              {"from": label, "to": new, "images": images.modified_count, "merged": merged})
+        fresh = await db.projects.find_one({"id": pid}, {"_id": 0, "classes": 1})
+        return {"classes": fresh.get("classes", []), "images_updated": images.modified_count, "merged": merged}
+
     @router.patch("/projects/{pid}/settings")
     async def update_project_settings(pid: str, payload: s.ProjectSettingsIn, current=Depends(get_current_user)):
         p = await s._project_access_check(pid, current["id"], roles=["owner", "admin"])

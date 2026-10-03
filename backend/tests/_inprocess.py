@@ -8,7 +8,8 @@ import os
 import sys
 from pathlib import Path
 
-os.environ["DB_NAME"] = "thinkvision_test_inprocess"
+# One database per pytest-xdist worker, so parallel workers never wipe each other's data.
+os.environ["DB_NAME"] = f"thinkvision_test_inprocess_{os.environ.get('PYTEST_XDIST_WORKER', 'main')}"
 os.environ["ALLOWED_EMAIL_DOMAIN"] = ""
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

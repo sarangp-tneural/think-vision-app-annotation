@@ -5,7 +5,9 @@ import Navbar from "@/components/Navbar";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { sourceLabel } from "@/lib/autolabel";
-import { Upload, Sparkles, ImageIcon, GitBranch, Rocket, CheckCircle2, Trash2, Video, Film, Loader2, XCircle, Clock, Send, UserPlus, Activity as ActivityIcon, Settings, TrendingUp } from "lucide-react";
+import { renameClass } from "@/lib/renameClass";
+import { CLASSES } from "@/constants/testIds";
+import { Upload, Sparkles, ImageIcon, GitBranch, Rocket, CheckCircle2, Trash2, Video, Film, Loader2, XCircle, Clock, Send, UserPlus, Activity as ActivityIcon, Settings, TrendingUp, Pencil } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -27,6 +29,7 @@ export default function ProjectDetail() {
   const [videoInterval, setVideoInterval] = useState(30);
   const [videoIntervalMode, setVideoIntervalMode] = useState("frames"); // "frames" | "seconds"
   const [bulkClassText, setBulkClassText] = useState("");
+  const [renaming, setRenaming] = useState(null); // { from, value }
   const [bulkClassOpen, setBulkClassOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
   const [batchJob, setBatchJob] = useState(null);
@@ -140,6 +143,14 @@ export default function ProjectDetail() {
     } catch (e) {
       toast.error(e.response?.data?.detail || "Failed to add classes");
     }
+  };
+
+  const submitRename = async () => {
+    if (!renaming) return;
+    const { from, value } = renaming;
+    setRenaming(null);
+    const res = await renameClass(pid, from, value, project.classes);
+    if (res) setProject((p) => (p ? { ...p, classes: res.classes } : p));
   };
 
   const removeClass = (label) => {
@@ -619,7 +630,28 @@ export default function ProjectDetail() {
                         <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto">
                           {project.classes.map((c) => (
                             <span key={c} className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-[#27272A] bg-[#0a0a0a]" data-testid={`class-chip-${c}`}>
-                              {c}
+                              {renaming?.from === c ? (
+                                <input
+                                  autoFocus
+                                  value={renaming.value}
+                                  onChange={(e) => setRenaming({ from: c, value: e.target.value })}
+                                  onKeyDown={(e) => { if (e.key === "Enter") submitRename(); if (e.key === "Escape") setRenaming(null); }}
+                                  onBlur={() => setRenaming(null)}
+                                  maxLength={40}
+                                  className="w-28 bg-transparent border border-primary px-1 text-xs focus:outline-none"
+                                  data-testid={CLASSES.renameInput}
+                                />
+                              ) : (<>
+                                {c}
+                                <button
+                                  onClick={() => setRenaming({ from: c, value: c })}
+                                  className="text-muted-foreground hover:text-primary"
+                                  data-testid={CLASSES.rename(c)}
+                                  title="Rename class (updates every image)"
+                                >
+                                  <Pencil className="w-3 h-3" />
+                                </button>
+                              </>)}
                               <button
                                 onClick={() => removeClass(c)}
                                 className="text-muted-foreground hover:text-destructive"

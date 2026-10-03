@@ -9,11 +9,13 @@ import {
 } from "@/components/ui/select";
 import { toast } from "sonner";
 import { sourceLabel } from "@/lib/autolabel";
+import { renameClass } from "@/lib/renameClass";
+import { CLASSES } from "@/constants/testIds";
 import {
   Save, Sparkles, Trash2, ArrowLeft, ArrowRight, Undo2,
   Square, Hexagon, Slash, Dot, Circle as CircleIcon, Keyboard,
   ZoomIn, ZoomOut, Maximize2, Send, CheckCircle2, XCircle, UserPlus,
-  MessageSquare, Reply, Check,
+  MessageSquare, Reply, Check, Pencil,
 } from "lucide-react";
 
 const COLORS = ["#06B6D4", "#D946EF", "#EAB308", "#22C55E", "#EF4444", "#F97316", "#3B82F6"];
@@ -40,6 +42,7 @@ export default function Annotator() {
   const [boxes, setBoxes] = useState([]);
   const [activeLabel, setActiveLabel] = useState("object");
   const [newLabel, setNewLabel] = useState("");
+  const [renamingClass, setRenamingClass] = useState(null); // { from, value }
   const [activeTool, setActiveTool] = useState("bbox");
   const [drawing, setDrawing] = useState(null);
   const [polyPoints, setPolyPoints] = useState([]);
@@ -506,6 +509,18 @@ export default function Annotator() {
     return acc;
   }, {});
 
+  const submitClassRename = async () => {
+    if (!renamingClass) return;
+    const { from, value } = renamingClass;
+    setRenamingClass(null);
+    const res = await renameClass(pid, from, value, project.classes);
+    if (!res) return;
+    setProject((p) => (p ? { ...p, classes: res.classes } : p));
+    // The server already relabeled the saved boxes; mirror it on the open canvas without marking it dirty.
+    setBoxes((bs) => bs.map((b) => (b.label === from ? { ...b, label: res.to } : b)));
+    setActiveLabel((cur) => (cur === from ? res.to : cur));
+  };
+
   const addClass = async () => {
     const label = newLabel.trim();
     if (!label) return;
@@ -635,17 +650,42 @@ export default function Annotator() {
               <div className="text-xs text-muted-foreground">No classes yet. Add one below.</div>
             )}
             {project.classes.map((c) => (
-              <button
-                key={c}
-                onClick={() => setActiveLabel(c)}
-                className={`w-full text-left px-3 py-2 border flex items-center gap-2 transition-colors ${
-                  activeLabel === c ? "border-primary bg-[#1C1C1C]" : "border-[#27272A] hover:bg-[#1C1C1C]"
-                }`}
-                data-testid={`class-btn-${c}`}
-              >
-                <span className="w-3 h-3 flex-shrink-0" style={{ background: labelColor(c) }} />
-                <span className="text-xs truncate">{c}</span>
-              </button>
+              <div key={c} className="flex items-stretch gap-1">
+                {renamingClass?.from === c ? (
+                  <Input
+                    autoFocus
+                    value={renamingClass.value}
+                    onChange={(e) => setRenamingClass({ from: c, value: e.target.value })}
+                    onKeyDown={(e) => { if (e.key === "Enter") submitClassRename(); if (e.key === "Escape") setRenamingClass(null); }}
+                    onBlur={() => setRenamingClass(null)}
+                    maxLength={40}
+                    className="rounded-sm bg-transparent border-primary h-9 text-xs"
+                    data-testid={CLASSES.renameInput}
+                  />
+                ) : (<>
+                  <button
+                    onClick={() => setActiveLabel(c)}
+                    className={`flex-1 min-w-0 text-left px-3 py-2 border flex items-center gap-2 transition-colors ${
+                      activeLabel === c ? "border-primary bg-[#1C1C1C]" : "border-[#27272A] hover:bg-[#1C1C1C]"
+                    }`}
+                    data-testid={`class-btn-${c}`}
+                  >
+                    <span className="w-3 h-3 flex-shrink-0" style={{ background: labelColor(c) }} />
+                    <span className="text-xs truncate">{c}</span>
+                  </button>
+                  {canManageRole && (
+                    <button
+                      onClick={() => setRenamingClass({ from: c, value: c })}
+                      className="px-2 border border-[#27272A] text-muted-foreground hover:text-primary hover:bg-[#1C1C1C]"
+                      title="Rename class (updates every image)"
+                      aria-label={`Rename class ${c}`}
+                      data-testid={CLASSES.rename(c)}
+                    >
+                      <Pencil className="w-3 h-3" />
+                    </button>
+                  )}
+                </>)}
+              </div>
             ))}
           </div>
 
