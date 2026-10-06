@@ -90,3 +90,6 @@ chainlit.md
 
 # Build caches
 .cache/
+
+
+cicd-pipeline-main/
