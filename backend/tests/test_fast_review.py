@@ -76,3 +76,11 @@ def test_review_then_queue_empty(client, db, world):
     assert db.activity_log.count_documents({"project_id": world["pid"], "action": "image_approved"}) == 1
     got = client.get(f"/api/projects/{world['pid']}/images/next", params={"mode": "review"}, headers=world["hdr"]).json()
     assert got["id"] is None
+
+
+def test_admin_with_empty_review_queue_still_has_images_to_annotate(client, world):
+    """Frontend falls through review -> annotate for owners/admins once nothing is waiting for review."""
+    h = world["hdr"]
+    url = f"/api/projects/{world['pid']}/images/next"
+    assert client.get(url, params={"mode": "review", "after": "c0"}, headers=h).json()["id"] is None
+    assert client.get(url, params={"mode": "annotate", "after": "c0"}, headers=h).json()["id"] == "c2"

@@ -10,7 +10,7 @@ import {
 import { toast } from "sonner";
 import { sourceLabel } from "@/lib/autolabel";
 import { renameClass } from "@/lib/renameClass";
-import { pickFastAction, queueMode } from "@/lib/fastAction";
+import { pickFastAction, queueMode, pickFallbackImage } from "@/lib/fastAction";
 import { CLASSES } from "@/constants/testIds";
 import {
   Save, Sparkles, Trash2, ArrowLeft, ArrowRight, Undo2,
@@ -496,14 +496,30 @@ export default function Annotator() {
   const patchListStatus = (id, review_status) =>
     setImages((list) => list.map((i) => (i.id === id ? { ...i, review_status } : i)));
 
-  const nextInQueue = (after) =>
-    api.get(`/projects/${pid}/images/next`, { params: { mode, after } }).then((r) => r.data.id);
+  // Own queue first. Owners/admins can both annotate and review, so when one queue is empty
+  // they continue into the other (e.g. approve the last submitted image -> next image to annotate).
+  const nextInQueue = async (after) => {
+    const modes = canManageRole ? [mode, mode === "review" ? "annotate" : "review"] : [mode];
+    for (const m of modes) {
+      const { data } = await api.get(`/projects/${pid}/images/next`, { params: { mode: m, after } });
+      if (data.id && data.id !== after) return data.id;
+    }
+    return null;
+  };
 
   // Opens the next image in the queue; the current one needs no flush because callers have just saved it.
   const openNext = (nextId) => {
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
-    if (nextId && nextId !== imgId) navigate(`/projects/${pid}/annotate/${nextId}`);
-    else toast.info("Nothing left in your queue");
+    if (nextId && nextId !== imgId) { navigate(`/projects/${pid}/annotate/${nextId}`); return; }
+    // Queue is empty: still leave the finished (now locked) image, for the next one this user can see.
+    const fallback = pickFallbackImage(images, imgId);
+    if (fallback) {
+      toast.info("Nothing left to do - showing the next image");
+      navigate(`/projects/${pid}/annotate/${fallback}`);
+    } else {
+      toast.success("All done - no more images");
+      navigate(`/projects/${pid}`);
+    }
   };
 
   // "]" - skip ahead without acting; saves a pending edit in the background first.

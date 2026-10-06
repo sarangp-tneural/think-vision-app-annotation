@@ -1,4 +1,4 @@
-import { pickFastAction, queueMode } from "./fastAction";
+import { pickFastAction, queueMode, pickFallbackImage } from "./fastAction";
 
 const base = { readOnly: false, status: "assigned", canReview: false, isAssignedToMe: true, canManageRole: false, assignee: "me" };
 
@@ -29,4 +29,14 @@ test("queue mode follows the action and the reviewer role", () => {
   expect(queueMode("review", "admin")).toBe("review");
   expect(queueMode("submit", "annotator")).toBe("annotate");
   expect(queueMode(null, "reviewer")).toBe("review");
+});
+
+describe("pickFallbackImage", () => {
+  const list = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  test("goes to the next image in the list", () => expect(pickFallbackImage(list, "a")).toBe("b"));
+  test("wraps to the first other image from the last one", () => expect(pickFallbackImage(list, "c")).toBe("a"));
+  test("null when it is the only image or the list is empty", () => {
+    expect(pickFallbackImage([{ id: "a" }], "a")).toBeNull();
+    expect(pickFallbackImage([], "a")).toBeNull();
+  });
 });
