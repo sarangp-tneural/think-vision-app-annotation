@@ -1,12 +1,30 @@
 """Image endpoints: upload, list, get, delete, annotations, assign, submit, review, file download."""
 import asyncio
+import hashlib
+import io
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import Response
+from pydantic import BaseModel
 
 router = APIRouter()
+
+
+class ReopenIn(BaseModel):
+    notes: str = ""
+    assigned_to: Optional[str] = None
+
+
+def _dimensions(content: bytes):
+    """(width, height) of an image, or (None, None) when it can't be decoded (it is stored regardless)."""
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(content)) as im:
+            return im.size
+    except Exception:
+        return None, None
 
 
 def register(s):
@@ -16,7 +34,7 @@ def register(s):
     logger = s.logger
 
     @router.post("/projects/{pid}/images")
-    async def upload_image(pid: str, file: UploadFile = File(...), current=Depends(get_current_user)):
+    async def upload_image(pid: str, file: UploadFile = File(...), force: bool = False, current=Depends(get_current_user)):
         await s._require_not_reviewer(pid, current["id"])
         ext = (file.filename.rsplit(".", 1)[-1] if "." in file.filename else "bin").lower()
         if ext not in ["jpg", "jpeg", "png", "webp", "gif"]:
@@ -24,6 +42,16 @@ def register(s):
         content = await file.read()
         if len(content) > 10 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+        content_hash = hashlib.sha256(content).hexdigest()
+        if not force:
+            # Identical bytes already in this project: warn instead of silently creating a second copy.
+            dup = await db.images.find_one({"project_id": pid, "content_hash": content_hash},
+                                           {"_id": 0, "id": 1, "filename": 1, "review_status": 1})
+            if dup:
+                raise HTTPException(status_code=409, detail={
+                    "message": f'Identical to "{dup.get("filename")}" already in this project',
+                    "duplicate_of": dup["id"], "filename": dup.get("filename"),
+                    "review_status": dup.get("review_status")})
         img_id = str(uuid.uuid4())
         path = f"{APP_NAME}/projects/{pid}/{img_id}.{ext}"
         try:
@@ -40,10 +68,35 @@ def register(s):
             "review_status": "unassigned", "review_notes": "",
             "reviewed_by": None, "reviewed_at": None, "submitted_at": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
+            # fingerprint + size + origin, so duplicates and imports can be told apart later
+            "content_hash": content_hash,
+            "source": "upload",
         }
+        doc["width"], doc["height"] = await asyncio.to_thread(_dimensions, content)
         await db.images.insert_one(doc)
         doc.pop("_id", None)
         return doc
+
+    @router.get("/projects/{pid}/duplicates")
+    async def list_duplicates(pid: str, current=Depends(get_current_user)):
+        """Groups of images in the project with identical bytes (same content hash), largest groups first.
+        Images uploaded before fingerprints existed have no hash and are not included until the backfill has run."""
+        await s._verify_project(pid, current["id"])
+        groups = await db.images.aggregate([
+            {"$match": {"project_id": pid, "content_hash": {"$type": "string"}}},
+            {"$group": {"_id": "$content_hash", "count": {"$sum": 1}, "images": {"$push": {
+                "id": "$id", "filename": "$filename", "review_status": "$review_status", "source": "$source",
+                "split": "$split", "created_at": "$created_at", "storage_path": "$storage_path"}}}},
+            {"$match": {"count": {"$gt": 1}}},
+            {"$sort": {"count": -1, "_id": 1}},
+            {"$limit": 200},
+        ]).to_list(200)
+        unhashed = await db.images.count_documents({"project_id": pid, "content_hash": {"$exists": False}})
+        out = []
+        for g in groups:
+            imgs = sorted(g["images"], key=lambda i: i.get("created_at") or "")
+            out.append({"content_hash": g["_id"], "count": g["count"], "images": imgs})
+        return {"groups": out, "unhashed_images": unhashed}
 
     @router.get("/projects/{pid}/images")
     async def list_images(pid: str, status: Optional[str] = None, assignee: Optional[str] = None, current=Depends(get_current_user)):
@@ -151,6 +204,38 @@ def register(s):
             await s._maybe_send_retrain_nudge(project, current["id"])
         return {"ok": True}
 
+    @router.post("/images/{img_id}/reopen")
+    async def reopen_image(img_id: str, payload: ReopenIn, current=Depends(get_current_user)):
+        """approved -> rejected, so an approved (e.g. imported) image can be corrected. It then follows the normal
+        loop: the assignee edits and submits, a reviewer approves again. Notes are required, like any rejection."""
+        img = await db.images.find_one({"id": img_id})
+        if not img:
+            raise HTTPException(status_code=404, detail="Not found")
+        project = await db.projects.find_one({"id": img["project_id"]})
+        tid = project.get("team_id")
+        if tid:
+            m = await s._get_membership(tid, current["id"])
+            if not m or m["role"] not in ["owner", "admin", "reviewer"]:
+                raise HTTPException(status_code=403, detail="Only owners/admins/reviewers can reopen an image")
+        else:
+            await s._project_access_check(img["project_id"], current["id"])
+        if img.get("review_status") != "approved":
+            raise HTTPException(status_code=409, detail="Only approved images can be reopened")
+        if not (payload.notes or "").strip():
+            raise HTTPException(status_code=400, detail="Add a note explaining what to fix")
+        update = {"review_status": "rejected", "review_notes": payload.notes.strip(),
+                  "reviewed_by": current["id"], "reviewed_at": datetime.now(timezone.utc).isoformat()}
+        if payload.assigned_to:
+            if tid and not await db.team_members.find_one({"team_id": tid, "user_id": payload.assigned_to, "status": "active"}):
+                raise HTTPException(status_code=400, detail="User is not a member of this team")
+            update["assigned_to"] = payload.assigned_to
+        await db.images.update_one({"id": img_id}, {"$set": update})
+        await s._log_activity(img["project_id"], current["id"], "image_reopened", {"image_id": img_id, "notes": update["review_notes"]})
+        if update.get("assigned_to") and update["assigned_to"] != current["id"]:
+            await s._notify(update["assigned_to"], "rejected", "An approved image was reopened for correction",
+                            project_id=img["project_id"], image_id=img_id, meta={"notes": update["review_notes"]})
+        return {"ok": True, **{k: update[k] for k in ("review_status", "review_notes")}}
+
     @router.get("/images/{img_id}")
     async def get_image_meta(img_id: str, current=Depends(get_current_user)):
         img = await db.images.find_one({"id": img_id}, {"_id": 0})
@@ -184,6 +269,17 @@ def register(s):
             raise HTTPException(status_code=404, detail="Not found")
         await s._image_edit_check(img, current["id"])
         boxes = [b.model_dump() for b in payload.boxes]
+        project = await db.projects.find_one({"id": img["project_id"]}, {"classes": 1, "classes_locked": 1})
+        existing = project.get("classes", [])
+        # First-seen order, de-duplicated. Class order is the class index everywhere
+        # (export, training, deployment), so new labels are only ever appended.
+        new_labels = list(dict.fromkeys(b["label"] for b in boxes if b["label"] not in existing))
+        if new_labels and project.get("classes_locked"):
+            # Checked before anything is written so a rejected save changes nothing.
+            raise HTTPException(
+                status_code=422,
+                detail={"message": "Unknown labels in a project with locked classes", "unknown_labels": new_labels},
+            )
         changes = {
             "annotations": boxes, "annotated": len(boxes) > 0,
             "annotated_by": current["id"], "annotated_at": datetime.now(timezone.utc).isoformat(),
@@ -192,14 +288,11 @@ def register(s):
             changes["assigned_to"] = current["id"]
             changes["review_status"] = "assigned"
         await db.images.update_one({"id": img_id}, {"$set": changes})
-        project = await db.projects.find_one({"id": img["project_id"]}, {"classes": 1})
-        existing = set(project.get("classes", []))
-        new_labels = {b["label"] for b in boxes} - existing
         if new_labels:
-            updated_classes = sorted(existing | new_labels)
-            await db.projects.update_one({"id": img["project_id"]}, {"$set": {"classes": updated_classes}})
-        else:
-            updated_classes = project.get("classes", [])
+            # $addToSet/$each appends atomically, so concurrent saves can't overwrite each other's labels.
+            await db.projects.update_one({"id": img["project_id"]}, {"$addToSet": {"classes": {"$each": new_labels}}})
+            project = await db.projects.find_one({"id": img["project_id"]}, {"classes": 1})
+        updated_classes = project.get("classes", [])
         # Returned so the frontend doesn't need a separate GET /projects/{pid}
         # just to pick up newly-introduced labels after every save.
         return {"ok": True, "count": len(boxes), "classes": updated_classes}

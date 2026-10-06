@@ -72,6 +72,7 @@ def register(s):
                 "id": pid, "name": p["name"], "description": p.get("description", ""),
                 "task_type": p.get("task_type", "object_detection"),
                 "classes": p.get("classes", []),
+                "classes_locked": bool(p.get("classes_locked", False)),
                 "image_count": image_count, "annotated_count": annotated_count,
                 "team_id": tid, "team_name": team_name_map.get(tid, ""),
                 "created_at": p["created_at"],
@@ -130,7 +131,10 @@ def register(s):
 
     @router.delete("/projects/{pid}/classes/{label}")
     async def delete_class(pid: str, label: str, current=Depends(get_current_user)):
-        await s._project_access_check(pid, current["id"], roles=["owner", "admin"])
+        p = await s._project_access_check(pid, current["id"], roles=["owner", "admin"])
+        if p.get("classes_locked"):
+            # Removing a class shifts every later class index, which would corrupt labels on the server.
+            raise HTTPException(status_code=409, detail="Classes are locked: a class cannot be deleted")
         # $pull is atomic per-document - safe when several deletes for
         # different labels run concurrently (e.g. clicking through multiple
         # class chips quickly). A read-then-$set-the-whole-list here would
@@ -138,6 +142,23 @@ def register(s):
         await db.projects.update_one({"id": pid}, {"$pull": {"classes": label}})
         p = await db.projects.find_one({"id": pid}, {"_id": 0, "classes": 1})
         return {"classes": p.get("classes", [])}
+
+    @router.post("/projects/{pid}/classes/lock")
+    async def lock_classes(pid: str, payload: dict, current=Depends(get_current_user)):
+        """Freeze the class list as the source of truth for class indices. After this, labels can only
+        be appended explicitly; unknown labels on save, class delete and class merge are rejected."""
+        p = await s._project_access_check(pid, current["id"], roles=["owner", "admin"])
+        source = str(payload.get("source") or "manual")[:40]
+        origin = {
+            "source": source,
+            "data_yaml_path": (str(payload["data_yaml_path"])[:500] if payload.get("data_yaml_path") else None),
+            "locked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if not p.get("classes_locked"):
+            await db.projects.update_one({"id": pid}, {"$set": {"classes_locked": True, "class_origin": origin}})
+            await s._log_activity(pid, current["id"], "classes_locked", {"source": source})
+        fresh = await db.projects.find_one({"id": pid}, {"_id": 0, "classes": 1, "classes_locked": 1})
+        return {"classes": fresh.get("classes", []), "classes_locked": bool(fresh.get("classes_locked"))}
 
     @router.patch("/projects/{pid}/classes/{label}")
     async def rename_class(pid: str, label: str, payload: dict, current=Depends(get_current_user)):
@@ -153,6 +174,10 @@ def register(s):
         if label not in classes:
             raise HTTPException(status_code=404, detail="Class not found")
         merged = new in classes
+        locked = bool(p.get("classes_locked"))
+        if merged and locked:
+            # A merge removes an entry and shifts every later class index.
+            raise HTTPException(status_code=409, detail="Classes are locked: classes cannot be merged")
         if merged:
             res = await db.projects.update_one({"id": pid, "classes": classes}, {"$pull": {"classes": label}})
         else:
@@ -166,6 +191,15 @@ def register(s):
             {"$set": {"annotations.$[a].label": new}},
             array_filters=[{"a.label": label}],
         )
+        if locked:
+            # Index is unchanged, but the name no longer matches the server's data.yaml: flag it so the
+            # merge-back preview can show the drift.
+            await db.projects.update_one({"id": pid}, {"$set": {"class_name_drift": True}})
+        link_map = (p.get("remote_dataset") or {}).get("class_map") or {}
+        stale = [k for k, v in link_map.items() if v == label]
+        if stale:
+            # the label still stands for the same server class after being renamed here
+            await db.projects.update_one({"id": pid}, {"$set": {f"remote_dataset.class_map.{k}": new for k in stale}})
         allowed = (p.get("settings") or {}).get("gemini_allowed_classes")
         if isinstance(allowed, list) and label in allowed:
             moved = list(dict.fromkeys(new if c == label else c for c in allowed))
