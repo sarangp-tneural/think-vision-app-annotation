@@ -8,6 +8,8 @@ import {
   Play, RotateCcw, Trash2, Server, CheckCircle2, XCircle, Loader2, AlertCircle, History, Lock,
 } from "lucide-react";
 import { DEPLOY_PIPELINE as T } from "@/constants/testIds";
+import MergePlanPreview from "@/components/MergePlanPreview";
+import { planIsUsable } from "@/lib/mergePlan";
 
 // Defaults follow the team's manual fine-tuning recipe (train.py on the server).
 const HP_DEFAULTS = {
@@ -149,8 +151,13 @@ export default function DeployPipeline({ pid, project }) {
     env_mode: "system", venv_path: "",
     model_choice: "yolo", yolo_model: "yolov8n.pt",
     dataset_mode: "new", existing_data_yaml_path: "", extra_yaml_path: "",
+    label_format: "auto", // merge preview: the server dataset's label format (auto = recorded at import, else sampled)
   });
   const [remoteInfo, setRemoteInfo] = useState(null);
+  // Merge preview: what pushing to the server's existing dataset would add / update / leave alone.
+  const [mergePlan, setMergePlan] = useState(null);
+  const [mergeBuilding, setMergeBuilding] = useState(false);
+  const [mergeFlags, setMergeFlags] = useState({ confirm_label_updates: false, update_class_names: false });
   const [hp, setHp] = useState(HP_DEFAULTS);
   const setHpField = (key) => (e) => setHp((h) => ({ ...h, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value }));
   const setField = (key) => (e) => setFields((f) => ({ ...f, [key]: e.target.value }));
@@ -169,6 +176,12 @@ export default function DeployPipeline({ pid, project }) {
     for (const [k, v] of Object.entries(hp)) {
       if (v === "" || v === null || v === undefined) continue;
       hyper[k] = typeof v === "boolean" || k === "optimizer" || k === "device" ? v : Number(v);
+    }
+    if (body.dataset_mode === "merge" && planIsUsable(mergePlan)) {
+      // run exactly what was previewed; the server re-checks the plan is still valid
+      body.plan_id = mergePlan.id;
+      body.confirm_label_updates = mergeFlags.confirm_label_updates;
+      body.update_class_names = mergeFlags.update_class_names;
     }
     body.hyperparams = hyper;
     body.start_from_path = body.model_choice !== "yolo" ? body.model_choice : "";
@@ -360,6 +373,28 @@ export default function DeployPipeline({ pid, project }) {
     }
   };
 
+  // A preview belongs to one dataset on one server: changing either invalidates it.
+  useEffect(() => { setMergePlan(null); setMergeFlags({ confirm_label_updates: false, update_class_names: false }); },
+    [fields.existing_data_yaml_path, fields.dataset_mode, fields.host]);
+
+  const previewMerge = async (rid) => {
+    setMergeBuilding(true);
+    setMergePlan(null);
+    try {
+      const { data } = await api.post(`/pipeline/runs/${rid}/merge_plan`, { ...buildBody(), existing_data_yaml_path: fields.existing_data_yaml_path });
+      for (let i = 0; i < 1800; i++) { // up to ~30 min: it fingerprints the server's images
+        const { data: plan } = await api.get(`/pipeline/runs/${rid}/merge_plan`, { params: { plan_id: data.plan_id } });
+        setMergePlan(plan);
+        if (plan.status !== "building") break;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Could not preview the merge");
+    } finally {
+      setMergeBuilding(false);
+    }
+  };
+
   // Uploading straight away would copy the whole dataset into a fresh run
   // folder even when it's already on the server, so look first.
   const uploadDataset = async (rid) => {
@@ -383,7 +418,12 @@ export default function DeployPipeline({ pid, project }) {
       && !window.confirm("A dataset already exists on the server. Upload a fresh full copy anyway?")) {
       return;
     }
+    if (fields.dataset_mode === "merge" && !planIsUsable(mergePlan)
+      && !window.confirm("You haven't previewed the changes. Without a preview only NEW images are added; nothing already on the server is changed. Continue?")) {
+      return;
+    }
     await callStage(rid, "uploading_data");
+    setMergePlan(null); // a plan runs once; preview again for the next push
   };
 
   const deleteRun = async (rid) => {
@@ -575,6 +615,30 @@ export default function DeployPipeline({ pid, project }) {
                       </span>
                     </label>
                   ))}
+                  {fields.dataset_mode === "merge" && (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="text-muted-foreground">Server label format</span>
+                        <select value={fields.label_format} onChange={setField("label_format")} data-testid={T.mergeLabelFormat}
+                          className="rounded-sm bg-[#0A0A0A] border border-[#27272A] px-2 py-1 text-xs">
+                          <option value="auto">auto-detect</option>
+                          <option value="detect">boxes (detect)</option>
+                          <option value="seg">polygons (segmentation)</option>
+                          <option value="obb">oriented boxes (OBB)</option>
+                        </select>
+                      </div>
+                      <Button
+                        variant="outline" size="sm" disabled={submitting || mergeBuilding || !fields.existing_data_yaml_path}
+                        onClick={() => previewMerge(run.id)}
+                        className="rounded-sm h-8 text-xs uppercase tracking-[0.2em]"
+                        data-testid={T.mergePreviewButton}
+                      >
+                        Preview changes
+                      </Button>
+                      <MergePlanPreview runId={run.id} plan={mergePlan} flags={mergeFlags} setFlags={setMergeFlags}
+                        building={mergeBuilding} progress={mergePlan?.progress} />
+                    </div>
+                  )}
                   <RadioGroup
                     name="dataset_mode" value={fields.dataset_mode} testId={T.datasetModeRadio}
                     onChange={(v) => setFields((f) => ({ ...f, dataset_mode: v }))}
@@ -840,8 +904,17 @@ export default function DeployPipeline({ pid, project }) {
         const de = run.dataset_export;
         return de && (
           <div className="text-xs text-muted-foreground">
-            Uploaded {de.train_count} train · {de.valid_count} valid · {de.test_count} test images to{" "}
+            {de.dataset_mode === "merge" ? "Dataset on the server now has" : "Uploaded"} {de.train_count} train · {de.valid_count} valid · {de.test_count} test images {de.dataset_mode === "merge" ? "in" : "to"}{" "}
             <code className="text-primary">{de.remote_upload_path}</code>
+            {de.merge_summary && (
+              <span className="block" data-testid={T.mergeSummary}>
+                Added {de.merge_summary.added} new · updated {de.merge_summary.labels_updated} labels
+                {de.merge_summary.skipped_label_updates ? ` · left ${de.merge_summary.skipped_label_updates} edited labels unchanged` : ""}
+                {de.merge_summary.skipped_class_append ? ` · skipped ${de.merge_summary.skipped_class_append} using new classes` : ""}
+                {de.merge_summary.skipped_exists ? ` · ${de.merge_summary.skipped_exists} already existed` : ""}
+                {de.merge_summary.yaml_backup ? ` · data.yaml backed up to ${de.merge_summary.yaml_backup}` : ""}
+              </span>
+            )}
           </div>
         );
       }

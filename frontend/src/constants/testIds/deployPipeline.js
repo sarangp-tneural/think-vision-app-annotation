@@ -45,4 +45,12 @@ export const DEPLOY_PIPELINE = {
   deployModelSelect: 'deploy-pipeline-deploy-model-select',
   deployPathInput: 'deploy-pipeline-deploy-path-input',
   progressBar: 'deploy-pipeline-progress-bar',
+  mergePreviewButton: 'deploy-pipeline-merge-preview-button',
+  mergePlan: 'deploy-pipeline-merge-plan',
+  mergeWarning: 'deploy-pipeline-merge-warning',
+  mergeConfirmLabels: 'deploy-pipeline-merge-confirm-labels',
+  mergeConfirmClasses: 'deploy-pipeline-merge-confirm-classes',
+  mergeCategory: (c) => `deploy-pipeline-merge-category-${c}`,
+  mergeSummary: 'deploy-pipeline-merge-summary',
+  mergeLabelFormat: 'deploy-pipeline-merge-label-format',
 };

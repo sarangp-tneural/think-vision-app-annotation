@@ -6,8 +6,10 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { sourceLabel } from "@/lib/autolabel";
 import { renameClass } from "@/lib/renameClass";
-import { CLASSES } from "@/constants/testIds";
-import { Upload, Sparkles, ImageIcon, GitBranch, Rocket, CheckCircle2, Trash2, Video, Film, Loader2, XCircle, Clock, Send, UserPlus, Activity as ActivityIcon, Settings, TrendingUp, Pencil } from "lucide-react";
+import { CLASSES, IMPORT_DATASET, DUPLICATES } from "@/constants/testIds";
+import ImportDatasetDialog from "@/components/ImportDatasetDialog";
+import DuplicatesDialog from "@/components/DuplicatesDialog";
+import { Upload, Sparkles, ImageIcon, GitBranch, Rocket, CheckCircle2, Trash2, Video, Film, Loader2, XCircle, Clock, Send, UserPlus, Activity as ActivityIcon, Settings, TrendingUp, Pencil, PackagePlus, Lock, Copy } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -49,6 +51,8 @@ export default function ProjectDetail() {
   // Settings dialog
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [dupesOpen, setDupesOpen] = useState(false);
   const [settings, setSettings] = useState({ confidence_threshold: 0.4, fallback_to_gemini: true, min_boxes_threshold: 1, show_confidence: true, gemini_restrict_to_classes: false, gemini_allowed_classes: null });
   const [alQueue, setAlQueue] = useState(null);
   const [alLoading, setAlLoading] = useState(false);
@@ -161,11 +165,18 @@ export default function ProjectDetail() {
     // latency on every single one. Functional setProject updates throughout
     // so rapid clicks on different chips don't stomp each other via a stale
     // `project` closure.
+    // Remember the position so a failed delete restores the label where it was (class order is the class index).
+    const oldIndex = project.classes.indexOf(label);
     setProject((p) => (p ? { ...p, classes: p.classes.filter((c) => c !== label) } : p));
     api.delete(`/projects/${pid}/classes/${encodeURIComponent(label)}`)
       .then(({ data }) => setProject((p) => (p ? { ...p, classes: data.classes } : p)))
       .catch((e) => {
-        setProject((p) => (p && !p.classes.includes(label) ? { ...p, classes: [...p.classes, label].sort() } : p));
+        setProject((p) => {
+          if (!p || p.classes.includes(label)) return p;
+          const restored = [...p.classes];
+          restored.splice(Math.min(Math.max(oldIndex, 0), restored.length), 0, label);
+          return { ...p, classes: restored };
+        });
         toast.error(e.response?.data?.detail || `Failed to remove class "${label}"`);
       });
   };
@@ -252,14 +263,31 @@ export default function ProjectDetail() {
     if (!files || files.length === 0) return;
     setUploading(true);
     let ok = 0, fail = 0;
-    for (const f of files) {
+    const duplicates = []; // files whose bytes are already in this project
+    const send = async (f, force) => {
       const fd = new FormData();
       fd.append("file", f);
+      await api.post(`/projects/${pid}/images${force ? "?force=true" : ""}`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+    };
+    for (const f of files) {
       try {
-        await api.post(`/projects/${pid}/images`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+        await send(f, false);
         ok++;
       } catch (e) {
-        fail++;
+        const d = e.response?.data?.detail;
+        if (e.response?.status === 409 && d?.duplicate_of) duplicates.push({ file: f, of: d.filename });
+        else fail++;
+      }
+    }
+    if (duplicates.length) {
+      const shown = duplicates.slice(0, 8).map((d) => `- ${d.file.name} (same as ${d.of})`).join("\n");
+      const more = duplicates.length > 8 ? `\n...and ${duplicates.length - 8} more` : "";
+      if (window.confirm(`${duplicates.length} file(s) are already in this project:\n${shown}${more}\n\nUpload them again anyway?`)) {
+        for (const d of duplicates) {
+          try { await send(d.file, true); ok++; } catch (e) { fail++; }
+        }
+      } else {
+        toast.info(`Skipped ${duplicates.length} duplicate${duplicates.length > 1 ? "s" : ""}`);
       }
     }
     setUploading(false);
@@ -385,6 +413,22 @@ export default function ProjectDetail() {
               </Dialog>
             )}
             {canManage && (<>
+            <Button
+              variant="outline"
+              onClick={() => setImportOpen(true)}
+              className="rounded-sm border-[#27272A] bg-transparent hover:bg-[#1C1C1C] hover:border-primary hover:text-primary text-xs uppercase tracking-[0.2em]"
+              data-testid={IMPORT_DATASET.openButton}
+            >
+              <PackagePlus className="w-4 h-4 mr-2" /> Import
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => setDupesOpen(true)}
+              className="rounded-sm border-[#27272A] bg-transparent hover:bg-[#1C1C1C] hover:border-primary hover:text-primary text-xs uppercase tracking-[0.2em]"
+              data-testid={DUPLICATES.openButton}
+            >
+              <Copy className="w-4 h-4 mr-2" /> Duplicates
+            </Button>
             <Button
               variant="outline"
               onClick={() => navigate(`/projects/${pid}/versions`)}
@@ -591,6 +635,13 @@ export default function ProjectDetail() {
           <div className="flex items-center justify-between mb-3">
             <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
               Class Labels {project.classes.length > 0 && `(${project.classes.length})`}
+              {project.classes_locked && (
+                <span className="ml-3 inline-flex items-center gap-1 normal-case tracking-normal text-[10px] text-yellow-500"
+                  title="Class order matches the imported dataset. New labels can only be added explicitly; classes can't be deleted or merged."
+                  data-testid="classes-locked-badge">
+                  <Lock className="w-3 h-3" /> order locked
+                </span>
+              )}
             </div>
             {canManage && (
               <Dialog open={bulkClassOpen} onOpenChange={setBulkClassOpen}>
@@ -1280,6 +1331,12 @@ export default function ProjectDetail() {
           </TabsContent>
         </Tabs>
       </main>
+      {canManage && (
+        <DuplicatesDialog pid={pid} open={dupesOpen} onOpenChange={setDupesOpen} canDelete={canManage} onChanged={load} />
+      )}
+      {canManage && (
+        <ImportDatasetDialog pid={pid} open={importOpen} onOpenChange={setImportOpen} project={project} onChanged={load} />
+      )}
     </div>
   );
 }

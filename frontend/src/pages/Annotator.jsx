@@ -340,7 +340,12 @@ export default function Annotator() {
       // so no separate GET /projects/{pid} round trip is needed here.
       setProject((p) => (p ? { ...p, classes: data.classes } : p));
     } catch (e) {
-      toast.error("Save failed");
+      const detail = e.response?.data?.detail;
+      if (e.response?.status === 422 && detail?.unknown_labels) {
+        toast.error(`Not saved: unknown class ${detail.unknown_labels.map((l) => `"${l}"`).join(", ")}. Classes are locked - add the class first.`);
+      } else {
+        toast.error("Save failed");
+      }
     } finally {
       setSaving(false);
     }
@@ -369,7 +374,12 @@ export default function Annotator() {
     const cleanBoxes = targetBoxes.map(({ uid, ...rest }) => rest);
     api.put(`/images/${targetImgId}/annotations`, { boxes: cleanBoxes })
       .then(({ data }) => setProject((p) => (p ? { ...p, classes: data.classes } : p)))
-      .catch(() => toast.error("Couldn't save the previous image's edits — go back and re-save"));
+      .catch((e) => {
+        const unknown = e.response?.data?.detail?.unknown_labels;
+        toast.error(unknown
+          ? `Previous image not saved: unknown class ${unknown.map((l) => `"${l}"`).join(", ")} (classes are locked)`
+          : "Couldn't save the previous image's edits — go back and re-save");
+      });
   };
 
   const goToImage = (targetId) => {
