@@ -6,7 +6,11 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { sourceLabel } from "@/lib/autolabel";
 import { renameClass } from "@/lib/renameClass";
-import { CLASSES, IMPORT_DATASET, DUPLICATES } from "@/constants/testIds";
+import { CLASSES, IMPORT_DATASET, DUPLICATES, DATASET_DELETE } from "@/constants/testIds";
+import { countApproved } from "@/lib/deleteSelection";
+import {
+  AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogCancel,
+} from "@/components/ui/alert-dialog";
 import ImportDatasetDialog from "@/components/ImportDatasetDialog";
 import DuplicatesDialog from "@/components/DuplicatesDialog";
 import { Upload, Sparkles, ImageIcon, GitBranch, Rocket, CheckCircle2, Trash2, Video, Film, Loader2, XCircle, Clock, Send, UserPlus, Activity as ActivityIcon, Settings, TrendingUp, Pencil, PackagePlus, Lock, Copy } from "lucide-react";
@@ -28,6 +32,9 @@ export default function ProjectDetail() {
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [deleteIds, setDeleteIds] = useState(null); // ids waiting for delete confirmation
+  const [alsoApproved, setAlsoApproved] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [videoInterval, setVideoInterval] = useState(30);
   const [videoIntervalMode, setVideoIntervalMode] = useState("frames"); // "frames" | "seconds"
   const [bulkClassText, setBulkClassText] = useState("");
@@ -301,14 +308,25 @@ export default function ProjectDetail() {
     upload(Array.from(e.dataTransfer.files).filter(f => f.type.startsWith("image/")));
   };
 
-  const deleteImage = async (id, e) => {
-    e.stopPropagation();
-    if (!window.confirm("Delete this image?")) return;
+  const askDelete = (ids, e) => {
+    e?.stopPropagation();
+    setAlsoApproved(false);
+    setDeleteIds(ids);
+  };
+
+  const confirmDelete = async () => {
+    setDeleting(true);
     try {
-      await api.delete(`/images/${id}`);
-      toast.success("Deleted");
+      const { data } = await api.post(`/projects/${pid}/images/bulk-delete`, { image_ids: deleteIds, include_approved: alsoApproved });
+      toast.success(`Deleted ${data.deleted} image${data.deleted === 1 ? "" : "s"}${data.skipped_approved ? ` (${data.skipped_approved} approved kept)` : ""}`);
+      setSelectedIds(new Set());
+      setDeleteIds(null);
       load();
-    } catch { toast.error("Delete failed"); }
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Delete failed");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   if (loading || !project) {
@@ -817,6 +835,38 @@ export default function ProjectDetail() {
 
               <div className="flex items-center gap-2">
                 {canManage && selectedIds.size > 0 && (
+                  <Button
+                    variant="outline"
+                    onClick={() => askDelete([...selectedIds])}
+                    className="rounded-sm border-destructive text-destructive bg-transparent hover:bg-destructive/10 text-xs uppercase tracking-[0.2em]"
+                    data-testid={DATASET_DELETE.bulkButton}
+                  >
+                    <Trash2 className="w-3 h-3 mr-2" /> Delete ({selectedIds.size})
+                  </Button>
+                )}
+                <AlertDialog open={!!deleteIds} onOpenChange={(o) => { if (!o && !deleting) setDeleteIds(null); }}>
+                  <AlertDialogContent className="bg-[#121212] border-[#27272A] rounded-sm" data-testid={DATASET_DELETE.dialog}>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Delete {deleteIds?.length} image{deleteIds?.length === 1 ? "" : "s"}?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        This removes the image{deleteIds?.length === 1 ? "" : "s"}, annotations and comments from the project. It cannot be undone.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    {deleteIds && countApproved(images, deleteIds) > 0 && (
+                      <label className="flex items-start gap-2 text-sm text-destructive cursor-pointer">
+                        <input type="checkbox" checked={alsoApproved} onChange={(e) => setAlsoApproved(e.target.checked)} className="mt-1" data-testid={DATASET_DELETE.alsoApproved} />
+                        <span>Also delete {countApproved(images, deleteIds)} approved image{countApproved(images, deleteIds) === 1 ? "" : "s"} (they are kept unless this is ticked)</span>
+                      </label>
+                    )}
+                    <AlertDialogFooter>
+                      <AlertDialogCancel disabled={deleting} className="rounded-sm" data-testid={DATASET_DELETE.cancel}>Cancel</AlertDialogCancel>
+                      <Button onClick={confirmDelete} disabled={deleting} className="rounded-sm bg-destructive text-white hover:bg-destructive/90" data-testid={DATASET_DELETE.confirm}>
+                        {deleting ? "Deleting..." : "Delete"}
+                      </Button>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+                {canManage && selectedIds.size > 0 && (
                   <Dialog open={bulkOpen} onOpenChange={setBulkOpen}>
                     <DialogTrigger asChild>
                       <Button variant="outline" className="rounded-sm border-primary text-primary bg-[#1C1C1C] hover:bg-[#252525] text-xs uppercase tracking-[0.2em]" data-testid="bulk-assign-btn">
@@ -1129,9 +1179,10 @@ export default function ProjectDetail() {
                               <Film className="w-2.5 h-2.5" /> Video
                             </div>
                           )}
-                          {canManage && img.review_status !== "approved" && <button
-                            onClick={(e) => deleteImage(img.id, e)}
-                            className="absolute top-2 left-2 opacity-0 group-hover:opacity-100 bg-[#050505]/80 text-muted-foreground hover:text-destructive w-6 h-6 flex items-center justify-center transition-opacity"
+                          {canManage && <button
+                            onClick={(e) => askDelete([img.id], e)}
+                            className="absolute top-2 left-2 bg-[#050505]/80 text-muted-foreground hover:text-destructive w-6 h-6 flex items-center justify-center"
+                            title="Delete image"
                             data-testid={`delete-image-${img.id}`}
                           >
                             <Trash2 className="w-3 h-3" />

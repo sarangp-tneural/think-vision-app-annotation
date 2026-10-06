@@ -12,6 +12,11 @@ from pydantic import BaseModel
 router = APIRouter()
 
 
+class BulkDeleteIn(BaseModel):
+    image_ids: list[str]
+    include_approved: bool = False  # approved images are only deleted when this is set
+
+
 class ReopenIn(BaseModel):
     notes: str = ""
     assigned_to: Optional[str] = None
@@ -352,13 +357,29 @@ def register(s):
         return {"ok": True, "count": len(boxes), "classes": updated_classes,
                 **({"submitted": True, "review_status": "submitted"} if payload.submit else {})}
 
+    async def _delete_images(pid: str, ids: list, include_approved: bool, actor_id: str) -> dict:
+        """Delete images of one project (and their comments); approved ones only when asked for."""
+        found = await db.images.find({"id": {"$in": ids}, "project_id": pid}, {"id": 1, "review_status": 1}).to_list(len(ids) or 1)
+        approved = [i["id"] for i in found if i.get("review_status") == "approved"]
+        doomed = [i["id"] for i in found if include_approved or i["id"] not in set(approved)]
+        if doomed:
+            await db.images.delete_many({"id": {"$in": doomed}})
+            await db.comments.delete_many({"image_id": {"$in": doomed}})
+            await s._log_activity(pid, actor_id, "images_deleted", {"count": len(doomed)})
+        return {"deleted": len(doomed), "skipped_approved": 0 if include_approved else len(approved)}
+
+    @router.post("/projects/{pid}/images/bulk-delete")
+    async def bulk_delete_images(pid: str, payload: BulkDeleteIn, current=Depends(get_current_user)):
+        await s._project_access_check(pid, current["id"], roles=["owner", "admin"])
+        return await _delete_images(pid, list(dict.fromkeys(payload.image_ids)), payload.include_approved, current["id"])
+
     @router.delete("/images/{img_id}")
-    async def delete_image(img_id: str, current=Depends(get_current_user)):
+    async def delete_image(img_id: str, force: bool = False, current=Depends(get_current_user)):
         img = await db.images.find_one({"id": img_id})
         if not img:
             raise HTTPException(status_code=404, detail="Not found")
         await s._project_access_check(img["project_id"], current["id"], roles=["owner", "admin"])
-        if img.get("review_status") == "approved":
+        if img.get("review_status") == "approved" and not force:
             raise HTTPException(status_code=409, detail="Approved images cannot be deleted")
-        await db.images.delete_one({"id": img_id})
+        await _delete_images(img["project_id"], [img_id], force, current["id"])
         return {"ok": True}
