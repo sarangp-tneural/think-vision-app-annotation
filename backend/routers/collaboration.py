@@ -15,7 +15,7 @@ def register(s):
         img = await db.images.find_one({"id": img_id})
         if not img:
             raise HTTPException(status_code=404, detail="Not found")
-        await s._project_access_check(img["project_id"], current["id"])
+        await s._image_view_check(img, current["id"])
         cid = str(uuid.uuid4())
         doc = {
             "id": cid, "image_id": img_id, "project_id": img["project_id"],
@@ -63,7 +63,7 @@ def register(s):
         img = await db.images.find_one({"id": img_id})
         if not img:
             raise HTTPException(status_code=404, detail="Not found")
-        await s._project_access_check(img["project_id"], current["id"])
+        await s._image_view_check(img, current["id"])
         comments = await db.comments.find({"image_id": img_id}, {"_id": 0}).to_list(500)
         comments.sort(key=lambda x: x["created_at"])
         return comments

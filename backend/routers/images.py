@@ -100,11 +100,11 @@ def register(s):
 
     @router.get("/projects/{pid}/images")
     async def list_images(pid: str, status: Optional[str] = None, assignee: Optional[str] = None, current=Depends(get_current_user)):
-        await s._verify_project(pid, current["id"])
+        _, role = await s._project_access(pid, current["id"])
         q = {"project_id": pid}
         if status:
             q["review_status"] = status
-        if assignee == "me":
+        if assignee == "me" or role in s.RESTRICTED_VIEW_ROLES:  # annotators only ever see their own images
             q["assigned_to"] = current["id"]
         elif assignee:
             q["assigned_to"] = assignee
@@ -287,7 +287,7 @@ def register(s):
         img = await db.images.find_one({"id": img_id}, {"_id": 0})
         if not img:
             raise HTTPException(status_code=404, detail="Not found")
-        await s._project_access_check(img["project_id"], current["id"])
+        await s._image_view_check(img, current["id"])
         return img
 
     @router.get("/files/{path:path}")
@@ -295,7 +295,7 @@ def register(s):
         img = await db.images.find_one({"storage_path": path})
         if not img:
             raise HTTPException(status_code=404, detail="Not found")
-        await s._project_access_check(img["project_id"], current["id"])
+        await s._image_view_check(img, current["id"])
         try:
             data, ct = await asyncio.to_thread(s.get_object, path)
         except Exception as e:

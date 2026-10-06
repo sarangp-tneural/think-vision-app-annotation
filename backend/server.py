@@ -567,6 +567,18 @@ async def _image_edit_check(img: dict, user_id: str) -> str:
     return role
 
 
+RESTRICTED_VIEW_ROLES = ("annotator", "member")
+
+
+async def _image_view_check(img: dict, user_id: str) -> dict:
+    """Project access for reading one image. Annotators/members only see images assigned to them;
+    anything else looks like it doesn't exist."""
+    p, role = await _project_access(img["project_id"], user_id)
+    if role in RESTRICTED_VIEW_ROLES and img.get("assigned_to") != user_id:
+        raise HTTPException(status_code=404, detail="Not found")
+    return p
+
+
 async def _has_other_reviewer(team_id: str, user_id: str) -> bool:
     return await db.team_members.count_documents({
         "team_id": team_id, "status": "active", "role": {"$in": ["owner", "admin", "reviewer"]},
