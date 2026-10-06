@@ -10,6 +10,9 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
+import remote_training
+from schemas.deployment import InspectRemoteRequest, TrainRemoteRequest
+
 router = APIRouter()
 
 
@@ -54,6 +57,54 @@ def register(s):
         background.add_task(_job)
         await s._log_activity(pid, current["id"], "training_started", {"model_id": mid, "epochs": effective_epochs, "auto_scaled": epochs == 0})
         return doc
+
+    # Non-secret fields remembered per project so the form is prefilled next time. Never credentials.
+    _REMOTE_FORM_KEYS = ("host", "port", "username", "remote_workdir", "env_mode", "venv_path", "model_arch", "epochs")
+
+    @router.post("/projects/{pid}/train-remote")
+    async def train_remote_model(pid: str, payload: TrainRemoteRequest, background: BackgroundTasks, current=Depends(get_current_user)):
+        """Same as train-real, but the training runs on a host server over SSH. Owner/admin only, like the deploy pipeline."""
+        await s._project_access_check(pid, current["id"], roles=["owner", "admin"])
+        approved = await db.images.count_documents({"project_id": pid, "review_status": "approved", "annotations.0": {"$exists": True}})
+        if approved < s.MIN_TRAINING_IMAGES:
+            raise HTTPException(status_code=400, detail=f"Need at least {s.MIN_TRAINING_IMAGES} approved images (have {approved})")
+        effective_epochs = s.auto_scale_epochs(approved, requested=payload.epochs if payload.epochs > 0 else None)
+        mid = str(uuid.uuid4())
+        doc = {
+            "id": mid, "project_id": pid, "user_id": current["id"], "type": "real",
+            "name": None, "model_arch": payload.model_arch, "epochs": effective_epochs,
+            "epochs_requested": payload.epochs, "epochs_auto_scaled": payload.epochs == 0,
+            "status": "queued", "is_active": False, "purpose": "assist",
+            "source": "server", "trained_on": "server",
+            "training_image_count": approved, "progress": 0, "current_epoch": 0,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await db.models.insert_one(doc)
+        doc.pop("_id", None)
+        form = payload.model_dump()
+        await db.projects.update_one({"id": pid}, {"$set": {"remote_train_form": {k: form[k] for k in _REMOTE_FORM_KEYS if k in form}}})
+        req = {**form, "epochs": effective_epochs}  # credentials stay in this dict only
+
+        async def _job():
+            await asyncio.to_thread(remote_training.train_remote_sync, mid, pid, req, s.get_object, s.put_object, s.APP_NAME)
+        background.add_task(_job)
+        await s._log_activity(pid, current["id"], "training_started", {"model_id": mid, "epochs": effective_epochs, "remote": True})
+        return doc
+
+    @router.post("/projects/{pid}/inspect-host")
+    async def inspect_host(pid: str, payload: InspectRemoteRequest, current=Depends(get_current_user)):
+        """Read-only probe of a host (venv present? existing .pt files?) for the Model Training form."""
+        await s._project_access_check(pid, current["id"], roles=["owner", "admin"])
+        from routers.deployment import _inspect_remote_sync
+        try:
+            return await asyncio.to_thread(_inspect_remote_sync, payload)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Could not inspect host: {type(e).__name__}")
+
+    @router.get("/projects/{pid}/remote-train-form")
+    async def remote_train_form(pid: str, current=Depends(get_current_user)):
+        p = await s._project_access_check(pid, current["id"])
+        return p.get("remote_train_form") or {}
 
     @router.get("/models/{mid}")
     async def get_model(mid: str, current=Depends(get_current_user)):

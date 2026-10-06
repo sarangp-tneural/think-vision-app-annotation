@@ -15,6 +15,9 @@ import {
 } from "recharts";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import DeployPipeline from "@/pages/DeployPipeline";
+import RemoteTrainFields from "@/components/RemoteTrainFields";
+import { validateRemoteForm, remoteTrainBody } from "@/lib/remoteTrainForm";
+import { REMOTE_TRAIN } from "@/constants/testIds";
 import { Server } from "lucide-react";
 
 // Locally trained ("real") and server-trained (deploy pipeline) models share one list.
@@ -34,6 +37,8 @@ export default function ModelDeploy() {
   const [realTraining, setRealTraining] = useState(null);
   const [realEpochs, setRealEpochs] = useState(0); // 0 = auto
   const [realArch, setRealArch] = useState("yolov8n");
+  const [trainOn, setTrainOn] = useState("local"); // "local" = this system, "remote" = a host over SSH
+  const [remote, setRemote] = useState({ host: "", port: 22, username: "", authMode: "password", password: "", pem_key: "", remote_workdir: "", env_mode: "system", venv_path: "" });
   const [trainingPlan, setTrainingPlan] = useState(null);
   const [sysVersions, setSysVersions] = useState(null);
   const [activating, setActivating] = useState(null);
@@ -94,8 +99,25 @@ export default function ModelDeploy() {
     return () => clearInterval(iv);
   }, [realTraining]);
 
+  // Prefill the non-secret host fields remembered from the last remote run (owners/admins only).
+  useEffect(() => {
+    if (!canManage) return;
+    api.get(`/projects/${pid}/remote-train-form`).then(({ data }) => {
+      if (data?.host) setRemote((r) => ({ ...r, host: data.host, port: data.port || 22, username: data.username || "", remote_workdir: data.remote_workdir || "", env_mode: data.env_mode || "system", venv_path: data.venv_path || "" }));
+    }).catch(() => {});
+    // eslint-disable-next-line
+  }, [pid, canManage]);
+
   const trainReal = async () => {
     try {
+      if (trainOn === "remote") {
+        const problem = validateRemoteForm(remote);
+        if (problem) { toast.error(problem); return; }
+        const { data } = await api.post(`/projects/${pid}/train-remote`, remoteTrainBody(remote, realArch, realEpochs));
+        toast.success(`Remote training started on ${remote.host} · ${data.epochs} epochs on ${data.training_image_count} images`);
+        setRealTraining(data);
+        return;
+      }
       const { data } = await api.post(`/projects/${pid}/train-real?epochs=${realEpochs}&model_arch=${realArch}`);
       const modeMsg = data.epochs_auto_scaled ? `auto-scaled to ${data.epochs}` : `${data.epochs}`;
       toast.success(`Real training started · ${realArch} · ${modeMsg} epochs on ${data.training_image_count} images`);
@@ -269,6 +291,23 @@ export default function ModelDeploy() {
                   </span>
                 )}
               </div>
+              {canManage && (
+                <div className="mb-4 flex items-center gap-2" data-testid="train-on-switch">
+                  <span className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mr-2">Train on</span>
+                  {[["local", "This system", REMOTE_TRAIN.trainOnLocal], ["remote", "Remote host", REMOTE_TRAIN.trainOnRemote]].map(([id, label, tid]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setTrainOn(id)}
+                      className={`px-3 h-8 text-xs uppercase tracking-[0.2em] border rounded-sm ${trainOn === id ? "border-primary text-primary bg-primary/10" : "border-[#27272A] text-muted-foreground hover:text-foreground"}`}
+                      data-testid={tid}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {canManage && trainOn === "remote" && <RemoteTrainFields pid={pid} value={remote} onChange={setRemote} />}
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
                 <div>
                   <Label className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2 block">Architecture</Label>
@@ -307,7 +346,7 @@ export default function ModelDeploy() {
                     <Play className="w-4 h-4 mr-2" />
                     {realTraining && !["trained", "failed", "cancelled"].includes(realTraining.status)
                       ? `${realTraining.status}...`
-                      : `Train ${realArch}`}
+                      : `Train ${realArch}${trainOn === "remote" ? " on host" : ""}`}
                   </Button>
                 </div>
               </div>
@@ -320,6 +359,9 @@ export default function ModelDeploy() {
                   <> Currently {trainingPlan.eligible_images}/{trainingPlan.min_required} eligible.</>
                 )}
               </div>
+              {realTraining?.source === "server" && realTraining.log_tail && (
+                <pre className="mt-4 p-3 bg-[#050505] border border-[#27272A] text-[10px] text-muted-foreground max-h-48 overflow-auto whitespace-pre-wrap" data-testid={REMOTE_TRAIN.logTail}>{realTraining.log_tail}</pre>
+              )}
               {realTraining && (
                 <div className="mt-4 p-3 bg-[#050505] border border-[#27272A] flex items-center gap-3" data-testid="training-progress">
                   {realTraining.status === "trained" ? (

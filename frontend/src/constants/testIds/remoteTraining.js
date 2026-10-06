@@ -1,0 +1,15 @@
+export const REMOTE_TRAIN = {
+  trainOnLocal: "train-on-local",
+  trainOnRemote: "train-on-remote",
+  host: "remote-host-input",
+  port: "remote-port-input",
+  username: "remote-username-input",
+  password: "remote-password-input",
+  pemKey: "remote-pem-input",
+  workdir: "remote-workdir-input",
+  envMode: "remote-env-select",
+  venvPath: "remote-venv-input",
+  checkHost: "remote-check-host-btn",
+  hostInfo: "remote-host-info",
+  logTail: "remote-log-tail",
+};

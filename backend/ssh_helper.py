@@ -84,7 +84,8 @@ def exec_command(client: paramiko.SSHClient, cmd: str,
 def exec_command_streaming(client: paramiko.SSHClient, cmd: str,
                             on_output: Optional[Callable[[str], None]] = None,
                             timeout: Optional[float] = None,
-                            poll_interval: float = 0.5) -> Tuple[int, str, str]:
+                            poll_interval: float = 0.5,
+                            should_stop: Optional[Callable[[], bool]] = None) -> Tuple[int, str, str]:
     """Long-running command execution with incremental stdout delivery, for a
     caller that wants to observe progress while the command is still running
     (e.g. regex-scraping a remote training script's output) - exec_command
@@ -120,6 +121,10 @@ def exec_command_streaming(client: paramiko.SSHClient, cmd: str,
         return drained
 
     while not channel.exit_status_ready():
+        if should_stop and should_stop():
+            # Caller asked to abort: closing the channel ends our side; killing the remote process is the caller's job.
+            channel.close()
+            return -1, "".join(stdout_chunks), "".join(stderr_chunks)
         if not _drain_once():
             time.sleep(poll_interval)
     # exit_status_ready() can flip true before the buffer is fully flushed;

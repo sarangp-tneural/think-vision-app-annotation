@@ -146,3 +146,24 @@ class RollbackRequest(SSHCredentials):
     """Body for POST /projects/{pid}/pipeline/rollback."""
 
     remote_production_model_path: str
+
+
+class TrainRemoteRequest(SSHCredentials):
+    """Body for POST /projects/{pid}/train-remote (plain Model Training on a host over SSH, no pipeline run).
+    Credentials are per request and never stored; the other fields are remembered on the project."""
+
+    remote_workdir: str
+    env_mode: Literal["system", "existing", "create"] = "system"
+    venv_path: Optional[str] = None
+    model_arch: Literal["yolov8n", "yolov8s", "yolov8m", "yolov8l"] = "yolov8n"
+    epochs: int = 0  # 0 = auto, same as local training
+
+    @model_validator(mode="after")
+    def _check(self):
+        if self.env_mode == "existing" and not (self.venv_path or "").strip():
+            raise ValueError("venv_path is required when env_mode is 'existing'")
+        if not self.remote_workdir.strip():
+            raise ValueError("remote_workdir is required")
+        if not 0 <= self.epochs <= 200:
+            raise ValueError("epochs must be between 0 (auto) and 200")
+        return self
