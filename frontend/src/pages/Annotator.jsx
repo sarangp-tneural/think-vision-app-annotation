@@ -10,6 +10,7 @@ import {
 import { toast } from "sonner";
 import { sourceLabel } from "@/lib/autolabel";
 import { renameClass } from "@/lib/renameClass";
+import { pickFastAction, queueMode } from "@/lib/fastAction";
 import { CLASSES } from "@/constants/testIds";
 import {
   Save, Sparkles, Trash2, ArrowLeft, ArrowRight, Undo2,
@@ -35,6 +36,7 @@ export default function Annotator() {
   const viewportRef = useRef(null);
   const imageRef = useRef(null);
   const autoSaveTimer = useRef(null);
+  const fastRef = useRef({});
   const [image, setImage] = useState(null);
   const [images, setImages] = useState([]);
   const [project, setProject] = useState(null);
@@ -63,6 +65,9 @@ export default function Annotator() {
   const [newComment, setNewComment] = useState("");
   const [replyTo, setReplyTo] = useState(null);
   const [replyText, setReplyText] = useState("");
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectNote, setRejectNote] = useState("");
+  const [fastBusy, setFastBusy] = useState(false);
   const currentUser = getUser();
 
   // Mirrors the server's rules (_image_edit_check): the server is the authority, this keeps the UI honest.
@@ -422,6 +427,8 @@ export default function Annotator() {
     const meta = e.metaKey || e.ctrlKey;
     if (meta && e.key.toLowerCase() === "s") { e.preventDefault(); save(); return; }
     if (meta && e.key.toLowerCase() === "z") { e.preventDefault(); undo(); return; }
+    if (meta && e.key === "Enter") { e.preventDefault(); e.shiftKey ? fastRef.current.openReject() : fastRef.current.fastRun(); return; }
+    if (e.key === "]") { fastRef.current.jumpToQueueNext(); return; }
     if (e.key === "Escape") { cancelDrawing(); return; }
     if (e.key === "Enter") { finishPoly(); return; }
     if (e.key === " ") { e.preventDefault(); setSpaceDown(true); return; }
@@ -481,6 +488,97 @@ export default function Annotator() {
       toast.error(e.response?.data?.detail || "Review failed");
     }
   };
+
+  // ---- Fast path: act on this image, then land on the next one that needs the same kind of action ----
+  const fastAction = pickFastAction({ readOnly, status, canReview, isAssignedToMe, canManageRole, assignee });
+  const mode = queueMode(fastAction, myRole);
+
+  const patchListStatus = (id, review_status) =>
+    setImages((list) => list.map((i) => (i.id === id ? { ...i, review_status } : i)));
+
+  const nextInQueue = (after) =>
+    api.get(`/projects/${pid}/images/next`, { params: { mode, after } }).then((r) => r.data.id);
+
+  // Opens the next image in the queue; the current one needs no flush because callers have just saved it.
+  const openNext = (nextId) => {
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    if (nextId && nextId !== imgId) navigate(`/projects/${pid}/annotate/${nextId}`);
+    else toast.info("Nothing left in your queue");
+  };
+
+  // "]" - skip ahead without acting; saves a pending edit in the background first.
+  const jumpToQueueNext = async () => {
+    try {
+      const nextId = await nextInQueue(imgId);
+      if (nextId && nextId !== imgId) goToImage(nextId);
+      else toast.info("Nothing left in your queue");
+    } catch { toast.error("Couldn't find the next image"); }
+  };
+
+  const fastSubmit = async () => {
+    if (fastBusy || saving || fastAction !== "submit") return;
+    if (boxes.length === 0) { toast.error("Add at least one annotation before submitting"); return; }
+    setFastBusy(true);
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    try {
+      // eslint-disable-next-line no-unused-vars
+      const cleanBoxes = boxes.map(({ uid, ...rest }) => rest);
+      // Save+submit is one request; the next-image lookup runs alongside it.
+      const [{ data }, nextId] = await Promise.all([
+        api.put(`/images/${imgId}/annotations`, { boxes: cleanBoxes, submit: true }),
+        nextInQueue(imgId).catch(() => null),
+      ]);
+      setDirty(false);
+      setProject((p) => (p ? { ...p, classes: data.classes } : p));
+      patchListStatus(imgId, "submitted");
+      toast.success("Submitted for review");
+      openNext(nextId);
+    } catch (e) {
+      const detail = e.response?.data?.detail;
+      toast.error(detail?.unknown_labels
+        ? `Not saved: unknown class ${detail.unknown_labels.map((l) => `"${l}"`).join(", ")}. Classes are locked - add the class first.`
+        : (typeof detail === "string" ? detail : "Submit failed"));
+    } finally {
+      setFastBusy(false);
+    }
+  };
+
+  const fastReview = async (decision, notes = "") => {
+    if (fastBusy || fastAction !== "review") return;
+    if (decision === "reject" && !notes.trim()) { toast.error("Add a note so the annotator knows what to fix"); return; }
+    setFastBusy(true);
+    try {
+      const [, nextId] = await Promise.all([
+        api.post(`/images/${imgId}/review`, { decision, notes }),
+        nextInQueue(imgId).catch(() => null),
+      ]);
+      patchListStatus(imgId, decision === "approve" ? "approved" : "rejected");
+      toast.success(decision === "approve" ? "Approved" : "Rejected");
+      setRejecting(false);
+      setRejectNote("");
+      openNext(nextId);
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Review failed");
+    } finally {
+      setFastBusy(false);
+    }
+  };
+
+  const fastRun = () => (fastAction === "submit" ? fastSubmit() : fastAction === "review" ? fastReview("approve") : null);
+  // Always the latest closures, so the keyboard handler below never acts on stale state.
+  fastRef.current = { fastRun, openReject: () => fastAction === "review" && setRejecting(true), jumpToQueueNext };
+
+  // While working on this image, warm the browser cache with the next one in the queue.
+  useEffect(() => {
+    if (!image || !fastAction) return undefined;
+    let stale = false;
+    nextInQueue(imgId)
+      .then((nid) => (nid && nid !== imgId ? api.get(`/images/${nid}`) : null))
+      .then((r) => { if (r && !stale) { const im = new Image(); im.src = fileUrl(r.data.storage_path); } })
+      .catch(() => {});
+    return () => { stale = true; };
+    // eslint-disable-next-line
+  }, [imgId, fastAction]);
 
   // ---- Comments ----
   const addComment = async () => {
@@ -646,6 +744,19 @@ export default function Annotator() {
             >
               <Save className="w-4 h-4 mr-1" /> {saving ? "Saving..." : "Save"}
             </Button>
+            {fastAction && (
+              <Button
+                size="sm"
+                onClick={fastRun}
+                disabled={fastBusy || saving}
+                className="rounded-sm bg-[#22C55E] text-black hover:bg-[#22C55E]/90 h-8 text-xs uppercase tracking-[0.2em] font-bold"
+                data-testid="fast-next-btn"
+                title="Ctrl+Enter"
+              >
+                {fastAction === "submit" ? <Send className="w-4 h-4 mr-1" /> : <CheckCircle2 className="w-4 h-4 mr-1" />}
+                {fastBusy ? "Working..." : fastAction === "submit" ? "Save & Submit → Next" : "Approve → Next"}
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -723,6 +834,9 @@ export default function Annotator() {
                 <div key={t.id} className="flex items-center justify-between"><span>{t.label}</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">{t.key}</kbd></div>
               ))}
               <div className="flex items-center justify-between pt-2"><span>Save</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘S</kbd></div>
+              <div className="flex items-center justify-between"><span>Save/Approve → next</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘↵</kbd></div>
+              <div className="flex items-center justify-between"><span>Reject → next</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘⇧↵</kbd></div>
+              <div className="flex items-center justify-between"><span>Next needing work</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">]</kbd></div>
               <div className="flex items-center justify-between"><span>Undo</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘Z</kbd></div>
               <div className="flex items-center justify-between"><span>Finish polygon</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">↵</kbd></div>
               <div className="flex items-center justify-between"><span>Cancel</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">Esc</kbd></div>
@@ -1025,17 +1139,34 @@ export default function Annotator() {
                   </Button>
                   <Button
                     size="sm"
-                    onClick={() => {
-                      const notes = (window.prompt("What needs to be fixed? (required)") || "").trim();
-                      if (!notes) { toast.error("Add a note so the annotator knows what to fix"); return; }
-                      review("reject", notes);
-                    }}
+                    onClick={() => setRejecting(true)}
                     variant="outline"
                     className="rounded-sm border-destructive text-destructive bg-transparent hover:bg-destructive/10 h-8 text-xs uppercase tracking-[0.2em]"
                     data-testid="reject-btn"
                   >
                     <XCircle className="w-3 h-3 mr-1" /> Reject
                   </Button>
+                </div>
+              )}
+              {rejecting && canReview && reviewStatus === "submitted" && (
+                <div className="space-y-2" data-testid="reject-note-box">
+                  <textarea
+                    autoFocus
+                    value={rejectNote}
+                    onChange={(e) => setRejectNote(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") { setRejecting(false); }
+                      else if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); fastReview("reject", rejectNote); }
+                    }}
+                    placeholder="What needs to be fixed? (Enter to reject → next)"
+                    rows={3}
+                    className="w-full rounded-sm bg-transparent border border-[#27272A] text-xs p-2 focus:outline-none focus:border-destructive"
+                    data-testid="reject-note-input"
+                  />
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button size="sm" variant="outline" onClick={() => setRejecting(false)} className="rounded-sm h-8 text-xs border-[#27272A] bg-transparent">Cancel</Button>
+                    <Button size="sm" disabled={fastBusy} onClick={() => fastReview("reject", rejectNote)} className="rounded-sm h-8 text-xs bg-destructive text-white hover:bg-destructive/90" data-testid="reject-confirm-btn">Reject → Next</Button>
+                  </div>
                 </div>
               )}
             </div>
