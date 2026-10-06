@@ -262,6 +262,7 @@ class AnnotationBox(BaseModel):
 
 class SaveAnnotationsIn(BaseModel):
     boxes: List[AnnotationBox]
+    submit: bool = False  # save and submit for review in one request
 
 class AssignImageIn(BaseModel):
     user_id: Optional[str] = None  # None = unassign
@@ -488,6 +489,11 @@ async def _project_out(pid: str):
 
 async def _project_access_check(pid: str, user_id: str, roles: Optional[List[str]] = None):
     """Returns the project if user has access via team membership (or legacy user_id)."""
+    return (await _project_access(pid, user_id, roles))[0]
+
+
+async def _project_access(pid: str, user_id: str, roles: Optional[List[str]] = None):
+    """Like _project_access_check but returns (project, caller's role) from a single membership lookup."""
     p = await db.projects.find_one({"id": pid})
     if not p:
         raise HTTPException(status_code=404, detail="Not found")
@@ -505,11 +511,11 @@ async def _project_access_check(pid: str, user_id: str, roles: Optional[List[str
                 assigned = await db.project_assignments.find_one({"project_id": pid, "user_id": user_id})
                 if not assigned:
                     raise HTTPException(status_code=403, detail="Not assigned to this project")
-        return p
+        return p, m["role"]
     # legacy: user_id direct owner
     if p.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Not project owner")
-    return p
+    return p, "owner"
 
 
 LOCKED_STATUSES = ("submitted", "approved")
@@ -541,8 +547,7 @@ async def _image_edit_check(img: dict, user_id: str) -> str:
     Owner/admin: also unassigned images (the caller claims it on save). Nobody edits an image
     that is waiting for review or already approved.
     """
-    p = await _project_access_check(img["project_id"], user_id)
-    role = await _role_in_project(p, user_id)
+    _, role = await _project_access(img["project_id"], user_id)
     if role == "reviewer":
         raise HTTPException(status_code=403, detail="Reviewers can review but not edit annotations")
     status = img.get("review_status") or "unassigned"

@@ -5,7 +5,7 @@ import io
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -119,6 +119,40 @@ def register(s):
         ]
         return await db.images.aggregate(pipeline).to_list(10000)
 
+    @router.get("/projects/{pid}/images/next")
+    async def next_image(pid: str, mode: str, after: Optional[str] = None, current=Depends(get_current_user)):
+        """Next image that still needs this user's action, in the same order as the image list.
+        mode=annotate: my open images (owner/admin also unassigned ones); mode=review: submitted images
+        I am allowed to review. Wraps around to the top; id is null when nothing is waiting."""
+        project = await s._verify_project(pid, current["id"])
+        me = current["id"]
+        if mode == "annotate":
+            role = await s._role_in_project(project, me)
+            mine = {"assigned_to": me, "review_status": {"$in": ["assigned", "rejected"]}}
+            q = {"project_id": pid, "$or": [mine, {"assigned_to": {"$in": [None, ""]}, "review_status": {"$in": [None, "", "unassigned"]}}]} \
+                if role in ("owner", "admin") else {"project_id": pid, **mine}
+        elif mode == "review":
+            q = {"project_id": pid, "review_status": "submitted"}
+            tid = project.get("team_id")
+            if tid and await s._has_other_reviewer(tid, me):  # can't review own work, so don't land on it
+                q["annotated_by"] = {"$ne": me}
+                q["assigned_to"] = {"$ne": me}
+        else:
+            raise HTTPException(status_code=400, detail="mode must be annotate or review")
+        order = [("created_at", -1), ("id", -1)]
+        cur = await db.images.find_one({"id": after, "project_id": pid}, {"created_at": 1, "id": 1}) if after else None
+        if cur:
+            later = {**q, "$and": [{"$or": [
+                {"created_at": {"$lt": cur.get("created_at") or ""}},
+                {"created_at": cur.get("created_at") or "", "id": {"$lt": cur["id"]}},
+            ]}]}
+            hit = await db.images.find_one(later, {"id": 1}, sort=order)
+            if hit:
+                return {"id": hit["id"]}
+            q = {**q, "id": {"$ne": after}}
+        hit = await db.images.find_one(q, {"id": 1}, sort=order)
+        return {"id": hit["id"] if hit else None}
+
     @router.post("/images/{img_id}/assign")
     async def assign_image(img_id: str, payload: s.AssignImageIn, current=Depends(get_current_user)):
         img = await db.images.find_one({"id": img_id})
@@ -141,8 +175,24 @@ def register(s):
             await s._notify(target, "image_assigned", "An image was assigned to you", project_id=img["project_id"], image_id=img_id)
         return {"ok": True, **update}
 
+    async def _after_submit(img: dict, actor_id: str):
+        """Activity log + reviewer notifications; runs after the response so submitting stays instant."""
+        await s._log_activity(img["project_id"], actor_id, "image_submitted", {"image_id": img["id"]})
+        project = await db.projects.find_one({"id": img["project_id"]}, {"name": 1, "team_id": 1})
+        if project and project.get("team_id"):
+            reviewers = await db.team_members.find({"team_id": project["team_id"], "role": {"$in": ["owner", "admin", "reviewer"]}, "status": "active"}).to_list(50)
+            for r in reviewers:
+                if r["user_id"] != actor_id:
+                    await s._notify(r["user_id"], "review_needed", f"Image submitted for review in '{project['name']}'", project_id=img["project_id"], image_id=img["id"])
+
+    def _submit_fields():
+        return {
+            "review_status": "submitted", "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "review_notes": "", "reviewed_by": None, "reviewed_at": None,  # previous verdict no longer applies
+        }
+
     @router.post("/images/{img_id}/submit")
-    async def submit_image(img_id: str, current=Depends(get_current_user)):
+    async def submit_image(img_id: str, background: BackgroundTasks, current=Depends(get_current_user)):
         img = await db.images.find_one({"id": img_id})
         if not img:
             raise HTTPException(status_code=404, detail="Not found")
@@ -153,21 +203,23 @@ def register(s):
             raise HTTPException(status_code=409, detail="Image has already been submitted or approved")
         if not img.get("annotations"):
             raise HTTPException(status_code=400, detail="Add at least one annotation before submitting")
-        await db.images.update_one({"id": img_id}, {"$set": {
-            "review_status": "submitted", "submitted_at": datetime.now(timezone.utc).isoformat(),
-            "review_notes": "", "reviewed_by": None, "reviewed_at": None,  # previous verdict no longer applies
-        }})
-        await s._log_activity(img["project_id"], current["id"], "image_submitted", {"image_id": img_id})
-        project = await db.projects.find_one({"id": img["project_id"]})
-        if project and project.get("team_id"):
-            reviewers = await db.team_members.find({"team_id": project["team_id"], "role": {"$in": ["owner", "admin", "reviewer"]}, "status": "active"}).to_list(50)
-            for r in reviewers:
-                if r["user_id"] != current["id"]:
-                    await s._notify(r["user_id"], "review_needed", f"Image submitted for review in '{project['name']}'", project_id=img["project_id"], image_id=img_id)
+        await db.images.update_one({"id": img_id}, {"$set": _submit_fields()})
+        background.add_task(_after_submit, img, current["id"])
         return {"ok": True}
 
+    async def _after_review(img: dict, project: dict, payload, actor_id: str):
+        """Activity log, notification and retrain nudge; runs after the response so reviewing stays instant."""
+        approved = payload.decision == "approve"
+        await s._log_activity(img["project_id"], actor_id, "image_approved" if approved else "image_rejected", {"image_id": img["id"], "notes": payload.notes or ""})
+        if img.get("assigned_to") and img["assigned_to"] != actor_id:
+            kind = "review_completed" if approved else "rejected"
+            title = "Your annotation was approved" if approved else "Your annotation was rejected"
+            await s._notify(img["assigned_to"], kind, title, project_id=img["project_id"], image_id=img["id"], meta={"notes": payload.notes or ""})
+        if approved:
+            await s._maybe_send_retrain_nudge(project, actor_id)
+
     @router.post("/images/{img_id}/review")
-    async def review_image(img_id: str, payload: s.ReviewImageIn, current=Depends(get_current_user)):
+    async def review_image(img_id: str, payload: s.ReviewImageIn, background: BackgroundTasks, current=Depends(get_current_user)):
         img = await db.images.find_one({"id": img_id})
         if not img:
             raise HTTPException(status_code=404, detail="Not found")
@@ -195,13 +247,7 @@ def register(s):
             "reviewed_by": current["id"],
             "reviewed_at": datetime.now(timezone.utc).isoformat(),
         }})
-        await s._log_activity(img["project_id"], current["id"], "image_approved" if payload.decision == "approve" else "image_rejected", {"image_id": img_id, "notes": payload.notes or ""})
-        if img.get("assigned_to") and img["assigned_to"] != current["id"]:
-            kind = "review_completed" if payload.decision == "approve" else "rejected"
-            title = "Your annotation was approved" if payload.decision == "approve" else "Your annotation was rejected"
-            await s._notify(img["assigned_to"], kind, title, project_id=img["project_id"], image_id=img_id, meta={"notes": payload.notes or ""})
-        if payload.decision == "approve":
-            await s._maybe_send_retrain_nudge(project, current["id"])
+        background.add_task(_after_review, img, project, payload, current["id"])
         return {"ok": True}
 
     @router.post("/images/{img_id}/reopen")
@@ -263,7 +309,7 @@ def register(s):
         )
 
     @router.put("/images/{img_id}/annotations")
-    async def save_annotations(img_id: str, payload: s.SaveAnnotationsIn, current=Depends(get_current_user)):
+    async def save_annotations(img_id: str, payload: s.SaveAnnotationsIn, background: BackgroundTasks, current=Depends(get_current_user)):
         img = await db.images.find_one({"id": img_id})
         if not img:
             raise HTTPException(status_code=404, detail="Not found")
@@ -287,7 +333,15 @@ def register(s):
         if not img.get("assigned_to"):  # owner/admin annotating an unassigned image claims it
             changes["assigned_to"] = current["id"]
             changes["review_status"] = "assigned"
+        if payload.submit:
+            # Save + submit in one request. The edit check already limited this to open, own images;
+            # checked before the write so a refused submit saves nothing.
+            if not boxes:
+                raise HTTPException(status_code=400, detail="Add at least one annotation before submitting")
+            changes.update(_submit_fields())
         await db.images.update_one({"id": img_id}, {"$set": changes})
+        if payload.submit:
+            background.add_task(_after_submit, img, current["id"])
         if new_labels:
             # $addToSet/$each appends atomically, so concurrent saves can't overwrite each other's labels.
             await db.projects.update_one({"id": img["project_id"]}, {"$addToSet": {"classes": {"$each": new_labels}}})
@@ -295,7 +349,8 @@ def register(s):
         updated_classes = project.get("classes", [])
         # Returned so the frontend doesn't need a separate GET /projects/{pid}
         # just to pick up newly-introduced labels after every save.
-        return {"ok": True, "count": len(boxes), "classes": updated_classes}
+        return {"ok": True, "count": len(boxes), "classes": updated_classes,
+                **({"submitted": True, "review_status": "submitted"} if payload.submit else {})}
 
     @router.delete("/images/{img_id}")
     async def delete_image(img_id: str, current=Depends(get_current_user)):
