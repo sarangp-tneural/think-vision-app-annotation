@@ -1,5 +1,6 @@
 import os
 import io
+import hashlib
 import uuid
 import base64
 import json
@@ -27,6 +28,7 @@ from dotenv import load_dotenv
 from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
 
 from pipeline_logic import SPLITS
+import yolo_codec
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -238,6 +240,7 @@ class ProjectOut(BaseModel):
     description: str
     task_type: str
     classes: List[str] = []
+    classes_locked: bool = False
     image_count: int = 0
     annotated_count: int = 0
     created_at: str
@@ -463,6 +466,9 @@ async def _project_out(pid: str):
         "description": p.get("description", ""),
         "task_type": p.get("task_type", "object_detection"),
         "classes": p.get("classes", []),
+        "classes_locked": bool(p.get("classes_locked", False)),
+        "class_origin": p.get("class_origin"),
+        "class_name_drift": bool(p.get("class_name_drift", False)),
         "image_count": image_count,
         "annotated_count": annotated_count,  # approved by a reviewer
         "labeled_count": labeled_count,  # has boxes, review may still be pending
@@ -699,6 +705,10 @@ def _extract_frames_sync(video_bytes: bytes, video_id: str, project_id: str, use
                             "annotations": [],
                             "annotated": False,
                             "from_video": video_id,
+                            "source": "video",
+                            "group_key": video_id,  # frames of one video must share a split (no train/valid leakage)
+                            "content_hash": hashlib.sha256(buf.tobytes()).hexdigest(),
+                            "width": int(frame.shape[1]), "height": int(frame.shape[0]),
                             "created_at": datetime.now(timezone.utc).isoformat(),
                         })
                         extracted += 1
@@ -1148,10 +1158,13 @@ async def team_dashboard(tid: str, current=Depends(get_current_user)):
 
 
 # ----------------- Versions & Export ----------------- #
+# Zip export is assembled in memory; refuse (413) beyond this rather than truncating silently.
+MAX_ZIP_EXPORT_IMAGES = int(os.environ.get("MAX_ZIP_EXPORT_IMAGES", "20000"))
 @api_router.post("/projects/{pid}/versions")
 async def create_version(pid: str, payload: VersionCreate, current=Depends(get_current_user)):
     await _verify_project(pid, current["id"])
-    images = await db.images.find({"project_id": pid, **APPROVED, "annotated": True}, {"_id": 0}).to_list(2000)
+    # Only ids are needed; no cap, so a large imported dataset is never silently truncated.
+    images = await db.images.find({"project_id": pid, **APPROVED, "annotated": True}, {"_id": 0, "id": 1}).sort("id", 1).to_list(None)
     vid = str(uuid.uuid4())
     doc = {
         "id": vid,
@@ -1185,9 +1198,19 @@ async def export_dataset(
     current=Depends(get_current_user),
 ):
     project = await _verify_project(pid, current["id"])
-    images = await db.images.find({"project_id": pid, **APPROVED, "annotated": True}, {"_id": 0}).to_list(2000)
+    export_filter = {"project_id": pid, **APPROVED, "annotated": True}
+    matching = await db.images.count_documents(export_filter)
+    if matching > MAX_ZIP_EXPORT_IMAGES:
+        # The zip is built in memory, so refuse loudly instead of silently dropping images.
+        raise HTTPException(
+            status_code=413,
+            detail=f"{matching} approved images is too many for a single zip export "
+                   f"(limit {MAX_ZIP_EXPORT_IMAGES}). Use the Deploy pipeline to push the dataset to a server instead.",
+        )
+    images = await db.images.find(export_filter, {"_id": 0}).sort("id", 1).to_list(None)
     classes = project.get("classes", [])
     label_to_idx = {c: i for i, c in enumerate(classes)}
+    skipped_unknown = 0  # boxes whose label is not in project.classes: skipped, never mapped to class 0
 
     def _ann_type(a):
         return a.get("type", "bbox")
@@ -1209,6 +1232,19 @@ async def export_dataset(
             rx, ry = a.get("rx", 0), a.get("ry", 0)
             return cx - rx, cy - ry, 2 * rx, 2 * ry
         return a.get("x", 0), a.get("y", 0), a.get("w", 0), a.get("h", 0)
+
+    def _image_dims(img, data):
+        """(width, height) from the stored fields, else measured from the bytes; None if neither is possible."""
+        if img.get("width") and img.get("height"):
+            return img["width"], img["height"]
+        if data:
+            try:
+                from PIL import Image as PILImage
+                with PILImage.open(io.BytesIO(data)) as pim:
+                    return pim.size
+            except Exception:
+                return None
+        return None
 
     def _fetch_image(img):
         try:
@@ -1235,7 +1271,10 @@ async def export_dataset(
                 # labels
                 lines = []
                 for a in img.get("annotations", []):
-                    idx = label_to_idx.get(a["label"], 0)
+                    idx = label_to_idx.get(a["label"])
+                    if idx is None:
+                        skipped_unknown += 1
+                        continue
                     t = _ann_type(a)
                     if t == "polygon" and a.get("points"):
                         # YOLO segmentation format: cls x1 y1 x2 y2 ...
@@ -1244,17 +1283,21 @@ async def export_dataset(
                     elif format == "yolo_obb" and t in ("bbox", None) and a.get("rotation"):
                         # YOLO OBB format: cls x1 y1 x2 y2 x3 y3 x4 y4 (all normalized)
                         x, y, w, h = _bbox_of(a)
-                        cx, cy = x + w / 2, y + h / 2
-                        theta = float(a.get("rotation", 0.0))  # radians
-                        cos_t, sin_t = math.cos(theta), math.sin(theta)
-                        hw, hh = w / 2, h / 2
-                        # Corners in bbox-local space (unrotated) → rotated around (cx, cy)
-                        local = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
-                        corners = []
-                        for lx, ly in local:
-                            rx = cx + lx * cos_t - ly * sin_t
-                            ry = cy + lx * sin_t + ly * cos_t
-                            corners.append(f"{max(0, min(1, rx)):.6f} {max(0, min(1, ry)):.6f}")
+                        theta = float(a.get("rotation", 0.0))  # radians, clockwise on screen
+                        dims = _image_dims(img, data)
+                        if dims:
+                            # The annotator rotates the box in PIXEL space, so the corners must be computed there;
+                            # rotating the normalized box is only right for square images.
+                            corners = [f"{cx_:.6f} {cy_:.6f}" for cx_, cy_ in yolo_codec.obb_to_corners(x, y, w, h, theta, dims[0], dims[1])]
+                        else:
+                            cx, cy = x + w / 2, y + h / 2
+                            cos_t, sin_t = math.cos(theta), math.sin(theta)
+                            hw, hh = w / 2, h / 2
+                            corners = []
+                            for lx, ly in [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]:
+                                rx = cx + lx * cos_t - ly * sin_t
+                                ry = cy + lx * sin_t + ly * cos_t
+                                corners.append(f"{max(0, min(1, rx)):.6f} {max(0, min(1, ry)):.6f}")
                         lines.append(f"{idx} " + " ".join(corners))
                     else:
                         x, y, w, h = _bbox_of(a)
@@ -1288,12 +1331,16 @@ async def export_dataset(
                     zf.writestr(f"dataset/images/{img_name}", data)
                 coco["images"].append({"id": i, "file_name": img_name, "width": width, "height": height})
                 for a in img.get("annotations", []):
+                    cat_id = label_to_idx.get(a["label"])
+                    if cat_id is None:
+                        skipped_unknown += 1
+                        continue
                     t = _ann_type(a)
                     x, y, w, h = _bbox_of(a)
                     coco_ann = {
                         "id": ann_id,
                         "image_id": i,
-                        "category_id": label_to_idx.get(a["label"], 0),
+                        "category_id": cat_id,
                         "bbox": [x * width, y * height, w * width, h * height],
                         "area": (w * width) * (h * height),
                         "iscrowd": 0,
@@ -1354,11 +1401,16 @@ async def export_dataset(
         else:
             raise HTTPException(status_code=400, detail="Unsupported format")
 
+    if skipped_unknown:
+        logger.warning(f"Export of project {pid}: skipped {skipped_unknown} box(es) with labels not in project.classes")
     buf.seek(0)
     return StreamingResponse(
         buf,
         media_type="application/zip",
-        headers={"Content-Disposition": f"attachment; filename={project['name']}_{format}.zip"},
+        headers={
+            "Content-Disposition": f"attachment; filename={project['name']}_{format}.zip",
+            "X-Skipped-Unknown-Labels": str(skipped_unknown),
+        },
     )
 
 
@@ -1404,7 +1456,8 @@ async def _build_split_dataset_dir(pid: str, project: dict, train_pct: float = 0
     hardcodes exactly this shape. Used both by export_dataset's "split"
     format (manual download) and, from M4 onward, the pipeline's own
     uploading_data stage (SCP'd directly, no ZIP involved)."""
-    images = await db.images.find({"project_id": pid, **APPROVED, "annotated": True}, {"_id": 0}).to_list(2000)
+    # Written to a temp dir on disk, so there is no cap here (it used to silently drop everything past 2000).
+    images = await db.images.find({"project_id": pid, **APPROVED, "annotated": True}, {"_id": 0}).sort("id", 1).to_list(None)
     classes = project.get("classes", [])
     cls_to_idx = {c: i for i, c in enumerate(classes)}
 
@@ -1784,6 +1837,23 @@ def _yolo_predict_sync(weights_path: str, image_bytes: bytes, classes: List[str]
 
 
 async def _auto_label_router(project_id: str, image_bytes: bytes, project=None) -> tuple:
+    """Same as _auto_label_router_unfiltered, but in a project with locked classes it can never introduce a
+    new class: labels are mapped back (case-insensitively) to the existing spelling and unknown ones dropped."""
+    if project is None:
+        project = await db.projects.find_one({"id": project_id})
+    boxes, source = await _auto_label_router_unfiltered(project_id, image_bytes, project=project)
+    if project and project.get("classes_locked"):
+        by_lower = {c.lower(): c for c in project.get("classes", [])}
+        kept = []
+        for b in boxes:
+            exact = by_lower.get(str(b.get("label", "")).lower())
+            if exact is not None:
+                kept.append({**b, "label": exact})
+        boxes = kept
+    return boxes, source
+
+
+async def _auto_label_router_unfiltered(project_id: str, image_bytes: bytes, project=None) -> tuple:
     """Returns (boxes, source). source in {'model', 'gemini', 'model+gemini', 'model_no_fallback'}.
     Applies per-project settings: confidence_threshold, fallback_to_gemini, min_boxes_threshold."""
     if project is None:
@@ -1957,6 +2027,7 @@ from routers import images as _images_router
 from routers import deployment as _deployment_router
 from routers import work_logs as _work_logs_router
 from routers import manager as _manager_router
+from routers import imports as _imports_router
 _training_router.register(_this_module)
 _al_router.register(_this_module)
 _auth_router.register(_this_module)
@@ -1967,6 +2038,7 @@ _images_router.register(_this_module)
 _deployment_router.register(_this_module)
 _work_logs_router.register(_this_module)
 _manager_router.register(_this_module)
+_imports_router.register(_this_module)
 api_router.include_router(_training_router.router)
 api_router.include_router(_al_router.router)
 api_router.include_router(_auth_router.router)
@@ -1977,6 +2049,7 @@ api_router.include_router(_images_router.router)
 api_router.include_router(_deployment_router.router)
 api_router.include_router(_work_logs_router.router)
 api_router.include_router(_manager_router.router)
+api_router.include_router(_imports_router.router)
 
 app.include_router(api_router)
 
@@ -2026,6 +2099,33 @@ async def startup():
         logger.info("MongoDB indexes ensured")
     except Exception as e:
         logger.error(f"Index creation failed: {e}")
+    # Dataset import (own block so a failure here can't skip the indexes above). Idempotent.
+    try:
+        await db.images.create_index([("project_id", 1), ("content_hash", 1)])
+        await db.images.create_index([("project_id", 1), ("split", 1)])
+        # one image per (project, origin file): makes re-running an import idempotent
+        await db.images.create_index(
+            [("project_id", 1), ("provenance.origin_key", 1)], unique=True,
+            partialFilterExpression={"provenance.origin_key": {"$type": "string"}})
+        await db.import_batches.create_index([("project_id", 1), ("created_at", -1)])
+        await db.import_batches.create_index([("id", 1)])
+        # at most one in-flight import per project
+        await db.import_batches.create_index([("project_id", 1)], unique=True, partialFilterExpression={"active": True})
+        await db.import_items.create_index([("batch_id", 1), ("status", 1)])
+        await db.import_items.create_index([("project_id", 1), ("origin_key", 1)])
+        await _imports_router.recover_interrupted(db)
+    except Exception as e:
+        logger.error(f"Import index/recovery setup failed: {e}")
+    # Dataset merge: plan lookups, and "at most one busy run per pipeline" enforced by the database.
+    try:
+        await db.merge_plans.create_index([("run_id", 1), ("created_at", -1)])
+        await db.merge_plans.create_index([("id", 1)])
+        await db.merge_plan_items.create_index([("plan_id", 1), ("category", 1)])
+        await db.pipeline_runs.create_index([("pipeline_id", 1)], unique=True, partialFilterExpression={"busy": True})
+    except Exception as e:
+        # e.g. an old database already holds two busy runs for one pipeline (a stuck flag): the application-level
+        # check in routers/deployment.py still applies; clear the stuck flag and restart to get the index.
+        logger.error(f"Merge index setup failed: {e}")
 
 
 @app.on_event("shutdown")
