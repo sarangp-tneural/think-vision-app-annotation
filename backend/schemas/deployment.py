@@ -48,12 +48,30 @@ class UploadingDataRequest(SSHCredentials):
     # dataset described by existing_data_yaml_path; "reuse" trains on it as-is.
     dataset_mode: Literal["new", "merge", "reuse"] = "new"
     existing_data_yaml_path: Optional[str] = None
+    # merge only: execute a previewed plan (POST .../merge_plan). Without one, merge builds a plan itself and only
+    # ADDS new images. Label updates and data.yaml class additions never happen unless confirmed here.
+    plan_id: Optional[str] = None
+    confirm_label_updates: bool = False
+    update_class_names: bool = False
 
     @model_validator(mode="after")
     def _existing_yaml_required(self):
         if self.dataset_mode != "new" and not self.existing_data_yaml_path:
             raise ValueError("existing_data_yaml_path is required for dataset_mode merge/reuse")
         return self
+
+
+class MergePlanRequest(SSHCredentials):
+    """Body for POST /pipeline/runs/{rid}/merge_plan: a read-only preview of what a merge into an existing server
+    dataset would add / update / skip. Credentials are request-only like everywhere else."""
+
+    existing_data_yaml_path: str
+    train_pct: float = 0.7
+    valid_pct: float = 0.2
+    test_pct: float = 0.1
+    # Label format of the server's dataset (detect | seg | obb). "auto" uses what the import recorded, else samples the
+    # server's labels, and asks when they are ambiguous (9 values per line can be a polygon or an oriented box).
+    label_format: str = "auto"
 
 
 class TrainingRemoteRequest(SSHCredentials):

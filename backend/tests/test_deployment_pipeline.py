@@ -165,6 +165,7 @@ def seeded_split_project(hdr, db):
         r = requests.post(
             f"{BASE_URL}/projects/{pid}/images",
             headers=hdr,
+            params={"force": "true"},  # 20 identical seed images: bypass the duplicate-upload warning on purpose
             files={"file": ("seed.jpg", buf, "image/jpeg")},
         )
         assert r.status_code == 200, r.text

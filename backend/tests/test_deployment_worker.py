@@ -764,35 +764,6 @@ def test_ensure_usable_yaml_writes_fixed_copy_when_path_is_stale():
     ) == "/srv/ds/data.yaml"
 
 
-def test_upload_into_existing_skips_known_images_refreshes_labels_and_keeps_split(tmp_path):
-    # remote already has img "a" in train; local run assigned it to valid.
-    for split in ("train", "valid"):
-        (tmp_path / split / "images").mkdir(parents=True)
-        (tmp_path / split / "labels").mkdir(parents=True)
-    (tmp_path / "valid" / "images" / "a.jpg").write_bytes(b"x")
-    (tmp_path / "valid" / "labels" / "a.txt").write_text("0 .5 .5 .1 .1")
-    (tmp_path / "train" / "images" / "b.jpg").write_bytes(b"y")
-    (tmp_path / "train" / "labels" / "b.txt").write_text("0 .5 .5 .2 .2")
-
-    remote = {"/d/train/images": ["a.jpg"], "/d/valid/images": []}
-    puts = []
-    sftp = MagicMock()
-    sftp.listdir.side_effect = lambda p: remote[p]
-    sftp.put.side_effect = lambda local, dest: puts.append(dest)
-    client = MagicMock()
-    client.open_sftp.return_value = sftp
-    split_dirs = {
-        "train": ("/d/train/images", "/d/train/labels"),
-        "valid": ("/d/valid/images", "/d/valid/labels"),
-    }
-    with patch.object(ssh_helper, "_ensure_remote_dir"):
-        deployment_worker._upload_into_existing(client, str(tmp_path), split_dirs)
-
-    assert "/d/train/images/a.jpg" not in puts and "/d/valid/images/a.jpg" not in puts  # not re-uploaded
-    assert "/d/train/labels/a.txt" in puts  # label refreshed where the image already lives
-    assert "/d/train/images/b.jpg" in puts and "/d/train/labels/b.txt" in puts
-
-
 def test_training_remote_resolves_relative_workdir_and_reports_stderr():
     db = MongoClient(MONGO_URL)[DB_NAME]
     pid, rid = _seed_run_with_dataset_export(db, run_type="bootstrap")

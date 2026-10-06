@@ -38,8 +38,20 @@ def _validate_split_pairing(dataset_dir: str, split: str) -> list:
     return errors
 
 
-def _validate_split_labels(dataset_dir: str, split: str, nc: int) -> list:
-    """Ported from cicd-pipeline-main/validate_data.py's validate_labels."""
+def _line_shape_ok(n_tokens: int, label_format: str) -> bool:
+    """Whether a label line has a token count its dataset format allows (detect: 5; seg: 5 or a polygon of >= 3
+    points; obb: 5 or exactly 4 corners)."""
+    if n_tokens == 5:
+        return True
+    if label_format == "seg":
+        return n_tokens >= 7 and n_tokens % 2 == 1
+    if label_format == "obb":
+        return n_tokens == 9
+    return False
+
+
+def _validate_split_labels(dataset_dir: str, split: str, nc: int, label_format: str = "detect") -> list:
+    """Ported from cicd-pipeline-main/validate_data.py's validate_labels (now aware of seg/obb label files)."""
     labels_dir = os.path.join(dataset_dir, split, "labels")
     if not os.path.exists(labels_dir):
         return []
@@ -54,8 +66,9 @@ def _validate_split_labels(dataset_dir: str, split: str, nc: int) -> list:
             parts = line.strip().split()
             if not parts:
                 continue
-            if len(parts) != 5:
-                errors.append(f"[{split}] {fname} line {i + 1}: expected 5 values, got {len(parts)}")
+            if not _line_shape_ok(len(parts), label_format):
+                expected = {"detect": "5 values", "seg": "5 values or a polygon (odd count, at least 7)", "obb": "5 or 9 values"}[label_format]
+                errors.append(f"[{split}] {fname} line {i + 1}: expected {expected}, got {len(parts)}")
                 continue
             class_id = int(parts[0])
             if class_id < 0 or class_id >= nc:
@@ -63,7 +76,7 @@ def _validate_split_labels(dataset_dir: str, split: str, nc: int) -> list:
     return errors
 
 
-def validate_dataset_dir(dataset_dir: str, nc: int) -> list:
+def validate_dataset_dir(dataset_dir: str, nc: int, label_format: str = "detect") -> list:
     """Validates a train/valid/test split directory (the shape
     _build_split_dataset_dir writes): image/label pairing and in-range class
     ids per split. Ported from cicd-pipeline-main/validate_data.py, minus its
@@ -73,7 +86,7 @@ def validate_dataset_dir(dataset_dir: str, nc: int) -> list:
     errors = []
     for split in SPLITS:
         errors += _validate_split_pairing(dataset_dir, split)
-        errors += _validate_split_labels(dataset_dir, split, nc)
+        errors += _validate_split_labels(dataset_dir, split, nc, label_format)
     return errors
 
 

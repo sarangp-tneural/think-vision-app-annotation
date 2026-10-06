@@ -239,3 +239,20 @@ def test_training_request_rejects_unknown_hyperparam():
     assert TrainingRemoteRequest(**base).epochs == 30
     with pytest.raises(ValidationError):
         TrainingRemoteRequest(**base, hyperparams={"data": "x"})
+
+
+def test_validate_dataset_dir_understands_segmentation_and_obb_label_files(tmp_path):
+    root = str(tmp_path)
+    for split in pl.SPLITS:
+        (tmp_path / split / "images").mkdir(parents=True)
+        (tmp_path / split / "labels").mkdir(parents=True)
+    (tmp_path / "train" / "images" / "a.jpg").write_bytes(b"x")
+    label = tmp_path / "train" / "labels" / "a.txt"
+    label.write_text("0 0.1 0.1 0.5 0.1 0.3 0.6\n1 0.5 0.5 0.2 0.2\n")  # a triangle and a plain box
+    assert any("expected 5 values" in e for e in pl.validate_dataset_dir(root, nc=2))  # detect: a polygon line is wrong
+    assert pl.validate_dataset_dir(root, nc=2, label_format="seg") == []
+    assert any("5 or 9 values" in e for e in pl.validate_dataset_dir(root, nc=2, label_format="obb"))  # 7 values is not an OBB
+    label.write_text("0 0.1 0.1 0.5 0.1 0.5 0.5 0.1 0.5\n")
+    assert pl.validate_dataset_dir(root, nc=2, label_format="obb") == [] and pl.validate_dataset_dir(root, nc=2, label_format="seg") == []
+    label.write_text("5 0.1 0.1 0.5 0.1 0.5 0.5 0.1 0.5\n")
+    assert any("out of range" in e for e in pl.validate_dataset_dir(root, nc=2, label_format="obb"))

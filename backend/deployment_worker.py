@@ -27,6 +27,7 @@ from pymongo import MongoClient
 
 import pipeline_logic
 import ssh_helper
+from dataset_import import merge_remote
 from pipeline_logic import SPLITS
 
 MONGO_URL = os.environ["MONGO_URL"]
@@ -83,7 +84,8 @@ def _build_split_dataset_dir_sync(sync_db, project_id: str, classes: list,
     {split}/{images,labels}/ layout and shuffle/cut logic, but using a sync
     pymongo db handle and an injected get_object_fn instead of the module
     Motor db (which cannot safely be touched from this worker thread)."""
-    images = list(sync_db.images.find({"project_id": project_id, "annotated": True, "review_status": "approved"}, {"_id": 0}).limit(2000))
+    # No cap: it used to .limit(2000), silently dropping the rest of a large (e.g. imported) dataset.
+    images = list(sync_db.images.find({"project_id": project_id, "annotated": True, "review_status": "approved"}, {"_id": 0}).sort("id", 1))
     # label_classes overrides the index order used in label files (merge mode
     # writes indices in the *remote* dataset's class order).
     cls_to_idx = {c: i for i, c in enumerate(label_classes if label_classes is not None else classes)}
@@ -214,141 +216,6 @@ def _count_remote_files(client, path: str) -> int:
         return 0
 
 
-def _upload_into_existing(client, tmp_root: str, split_dirs: dict, on_progress=None) -> None:
-    """Merges tmp_root/{split}/{images,labels}/* into a pre-existing remote
-    dataset. Images already present in ANY split dir (matched by file stem -
-    ids are stable uuids) are not re-uploaded and never moved to another split
-    (that would leak an image into both train and val); their label file is
-    refreshed in the split where the image already lives, so edited
-    annotations propagate. New images go to the split they were assigned."""
-    sftp = client.open_sftp()
-    try:
-        existing = {}  # image stem -> split it already lives in
-        for split, (remote_img, _lbl) in split_dirs.items():
-            try:
-                for name in sftp.listdir(remote_img):
-                    existing.setdefault(name.rsplit(".", 1)[0], split)
-            except FileNotFoundError:
-                pass
-
-        total = _count_local_files(tmp_root)
-        done = 0
-        for split in os.listdir(tmp_root):
-            img_local = os.path.join(tmp_root, split, "images")
-            lbl_local = os.path.join(tmp_root, split, "labels")
-            if not os.path.isdir(img_local) or split not in split_dirs:
-                continue
-            for fname in os.listdir(img_local):
-                stem = fname.rsplit(".", 1)[0]
-                target = existing.get(stem, split)
-                remote_img, remote_lbl = split_dirs[target]
-                if stem not in existing:
-                    ssh_helper._ensure_remote_dir(sftp, remote_img)
-                    sftp.put(os.path.join(img_local, fname), f"{remote_img}/{fname}")
-                    existing[stem] = target
-                done += 1
-                lbl_name = f"{stem}.txt"
-                if os.path.exists(os.path.join(lbl_local, lbl_name)):
-                    ssh_helper._ensure_remote_dir(sftp, remote_lbl)
-                    sftp.put(os.path.join(lbl_local, lbl_name), f"{remote_lbl}/{lbl_name}")
-                    done += 1
-                if on_progress:
-                    on_progress(done, total)
-    finally:
-        sftp.close()
-
-
-def _ensure_usable_yaml(client, yaml_cfg: dict, yaml_path: str, yaml_dir: str, path_exists) -> str:
-    """If the yaml's `path:` doesn't point at where its data really is (older
-    uploads wrote a local temp dir there), write a corrected copy beside it
-    (`data.fixed.yaml`) and return that path so training can resolve the
-    splits. The original file is never modified. Returns yaml_path unchanged
-    when no fix is needed."""
-    if not yaml_cfg.get("path"):
-        return yaml_path
-    root = pipeline_logic.effective_yaml_root(yaml_cfg, yaml_dir, path_exists)
-    declared = str(yaml_cfg["path"]).rstrip("/")
-    declared_abs = declared if declared.startswith("/") else posixpath.normpath(posixpath.join(yaml_dir, declared))
-    if root == declared_abs:
-        return yaml_path
-    fixed_path = f"{yaml_dir}/data.fixed.yaml"
-    fixed_cfg = {**yaml_cfg, "path": root}
-    sftp = client.open_sftp()
-    try:
-        with sftp.open(fixed_path, "w") as f:
-            f.write(yaml.safe_dump(fixed_cfg, sort_keys=False))
-    finally:
-        sftp.close()
-    return fixed_path
-
-
-def _make_progress_reporter(sync_db, run_id: str, min_interval: float = 0.5):
-    """Returns report(phase, done, total) that writes run.upload_progress,
-    throttled so a 2000-image upload doesn't hammer Mongo (the final
-    done==total update is always written)."""
-    last = {"t": 0.0}
-
-    def report(phase: str, done: int, total: int) -> None:
-        now = time.monotonic()
-        if done < total and now - last["t"] < min_interval:
-            return
-        last["t"] = now
-        sync_db.pipeline_runs.update_one(
-            {"id": run_id},
-            {"$set": {"upload_progress": {"phase": phase, "done": done, "total": total}}},
-        )
-
-    return report
-
-
-def _count_local_files(root: str) -> int:
-    return sum(len(files) for _r, _d, files in os.walk(root))
-
-
-def _read_remote_text(client, path: str) -> str:
-    exit_code, out, err = ssh_helper.exec_command(client, f"cat {shlex.quote(path)}")
-    if exit_code != 0:
-        raise Exception(f"cat {path} failed (exit {exit_code}): {err.strip()}")
-    return out
-
-
-def _count_remote_files(client, path: str) -> int:
-    exit_code, out, _err = ssh_helper.exec_command(
-        client, f"find {shlex.quote(path)} -maxdepth 1 -type f 2>/dev/null | wc -l"
-    )
-    try:
-        return int(out.strip()) if exit_code == 0 else 0
-    except ValueError:
-        return 0
-
-
-def _upload_into_existing(client, tmp_root: str, split_dirs: dict, on_progress=None) -> None:
-    """Uploads tmp_root/{split}/{images,labels}/* into the remote dirs of a
-    pre-existing dataset. Never overwrites: a file already present remotely
-    is left alone."""
-    total = _count_local_files(tmp_root)
-    done = 0
-    sftp = client.open_sftp()
-    try:
-        for split, (remote_img, remote_lbl) in split_dirs.items():
-            for sub, remote_dir in (("images", remote_img), ("labels", remote_lbl)):
-                local_dir = os.path.join(tmp_root, split, sub)
-                if not os.path.isdir(local_dir):
-                    continue
-                ssh_helper._ensure_remote_dir(sftp, remote_dir)
-                for fname in os.listdir(local_dir):
-                    remote_path = f"{remote_dir}/{fname}"
-                    try:
-                        sftp.stat(remote_path)
-                    except FileNotFoundError:
-                        sftp.put(os.path.join(local_dir, fname), remote_path)
-                    done += 1
-                    if on_progress:
-                        on_progress(done, total)
-    finally:
-        sftp.close()
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -369,6 +236,25 @@ def _resolve_req_paths(req: dict, keys=_PATH_KEYS) -> dict:
     with ssh_helper.connect(req["host"], req["port"], req["username"],
                              req.get("pem_key"), req.get("password")) as client:
         return {**req, **{k: ssh_helper.resolve_remote_path(client, req[k]) for k in todo}}
+
+
+def _load_or_build_plan(client, sync_db, run_id: str, project: dict, req: dict, get_object_fn, report) -> dict:
+    """The previewed plan the user confirmed, or - when none was given - a fresh one built right now (the caller then
+    only ever adds new images, because label updates and class additions need an explicit confirmation)."""
+    plan_id = req.get("plan_id")
+    if plan_id:
+        plan = sync_db.merge_plans.find_one({"id": plan_id, "run_id": run_id})
+        if not plan or plan.get("status") != "ready":
+            raise Exception("The previewed plan is not available (it may already have been used). Preview the changes again.")
+        if plan["expires_at"] < _now_iso():
+            raise Exception("The previewed plan has expired. Preview the changes again.")
+        return plan
+    plan_id = str(uuid.uuid4())
+    sync_db.merge_plans.insert_one({"id": plan_id, "run_id": run_id, "project_id": project["id"], "status": "building",
+                                    "created_at": _now_iso(), "inline": True})
+    fields = merge_remote.build_plan(client, sync_db, plan_id, project=project, req=req, get_object_fn=get_object_fn, progress=report)
+    sync_db.merge_plans.update_one({"id": plan_id}, {"$set": {**fields, "status": "ready"}})
+    return sync_db.merge_plans.find_one({"id": plan_id})
 
 
 def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: int,
@@ -428,34 +314,43 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
         else:
             data_yaml_path = req["existing_data_yaml_path"]
             remote_upload_path = posixpath.dirname(data_yaml_path)
+            merge_summary = None
             with ssh_helper.connect(*connect_args) as client:
                 yaml_cfg = yaml.safe_load(_read_remote_text(client, data_yaml_path)) or {}
-                remote_names = pipeline_logic.names_as_list(yaml_cfg)
-                missing = [c for c in classes if c not in remote_names]
-                if missing:
-                    raise Exception(
-                        f"classes missing from remote data.yaml names: {missing}"
-                    )
                 yaml_dir = posixpath.dirname(data_yaml_path)
                 path_exists = lambda p: ssh_helper.remote_exists(client, p)  # noqa: E731
-                split_dirs = pipeline_logic.resolve_yaml_split_dirs(yaml_cfg, yaml_dir, path_exists)
-                data_yaml_path = _ensure_usable_yaml(
-                    client, yaml_cfg, data_yaml_path, yaml_dir, path_exists
-                )
                 if dataset_mode == "merge":
-                    if not split_dirs:
-                        raise Exception("remote data.yaml has no train/val/test entries to merge into")
-                    tmp_root, split_info = _build_split_dataset_dir_sync(
-                        sync_db, project_id, classes,
-                        req["train_pct"], req["valid_pct"], req["test_pct"], get_object_fn,
-                        label_classes=remote_names,
-                        on_progress=lambda d, t: report("preparing", d, t),
-                    )
-                    # A yaml with no distinct test dir folds the test split
-                    # into val (resolve_yaml_split_dirs already did that).
-                    _upload_into_existing(client, tmp_root, split_dirs,
-                                          on_progress=lambda d, t: report("uploading", d, t))
+                    # Diff-based: images already on the server are skipped (by content), nothing is ever overwritten
+                    # unless the user confirmed a label update, and new images get a split once, deterministically.
+                    plan = _load_or_build_plan(client, sync_db, run_id, project, req, get_object_fn, report)
+                    stats = merge_remote.execute_plan(
+                        client, sync_db, plan, run_id=run_id, project_id=project_id,
+                        confirm_label_updates=bool(req.get("confirm_label_updates")),
+                        update_class_names=bool(req.get("update_class_names")),
+                        get_object_fn=get_object_fn, progress=report)
+                    sync_db.merge_plans.update_one({"id": plan["id"]}, {"$set": {"status": "executed", "executed_at": _now_iso(), "result": stats}})
+                    split_counts = stats.pop("split_counts")
+                    merge_summary = stats
+                    # classes may have been appended and the yaml's `path:` may be stale: use a fresh copy of it
+                    yaml_cfg = yaml.safe_load(_read_remote_text(client, plan["remote"]["data_yaml_path"])) or {}
+                    data_yaml_path = _ensure_usable_yaml(client, yaml_cfg, plan["remote"]["data_yaml_path"], yaml_dir, path_exists)
+                    test_ids = [i["id"] for i in sync_db.images.find(
+                        {"project_id": project_id, "annotated": True, "review_status": "approved", "split": "test"},
+                        {"id": 1, "_id": 0}).limit(200)] or [i["id"] for i in sync_db.images.find(
+                        {"project_id": project_id, "annotated": True, "review_status": "approved"}, {"id": 1, "_id": 0}).limit(50)]
+                    split_info = {"train_count": split_counts.get("train", 0), "valid_count": split_counts.get("valid", 0),
+                                  "test_count": split_counts.get("test", 0), "test_image_ids": test_ids}
                 else:  # reuse: nothing uploaded
+                    remote_names = pipeline_logic.names_as_list(yaml_cfg)
+                    missing = [c for c in classes if c not in remote_names]
+                    if missing:
+                        raise Exception(
+                            f"classes missing from remote data.yaml names: {missing}"
+                        )
+                    split_dirs = pipeline_logic.resolve_yaml_split_dirs(yaml_cfg, yaml_dir, path_exists)
+                    data_yaml_path = _ensure_usable_yaml(
+                        client, yaml_cfg, data_yaml_path, yaml_dir, path_exists
+                    )
                     split_info = {
                         "train_count": _count_remote_files(client, split_dirs["train"][0]) if "train" in split_dirs else 0,
                         "valid_count": _count_remote_files(client, split_dirs["valid"][0]) if "valid" in split_dirs else 0,
@@ -486,6 +381,7 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
                     "data_yaml_path": data_yaml_path,
                     "dataset_mode": dataset_mode,
                     "classes": classes,
+                    **({"merge_summary": merge_summary} if dataset_mode == "merge" else {}),
                 },
                 f"stage_history.{history_index}.status": "succeeded",
                 f"stage_history.{history_index}.finished_at": finished,

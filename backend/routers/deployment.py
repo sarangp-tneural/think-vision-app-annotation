@@ -30,15 +30,20 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import ValidationError
+from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
 
 import deployment_worker
 import pipeline_logic
 import ssh_helper
+from dataset_import import merge_remote
+from dataset_import import ssh_source
 from schemas.deployment import (
     ClassCheckRequest,
     DeployingRequest,
     DownloadingModelRequest,
     InspectRemoteRequest,
+    MergePlanRequest,
     RollbackRequest,
     TrainingRemoteRequest,
     UploadingDataRequest,
@@ -184,6 +189,29 @@ def _inspect_remote_sync(req: InspectRemoteRequest) -> dict:
         "models": models,
         "venv_ok": venv_ok,
     }
+
+
+def _build_plan_sync(plan_id: str, run_id: str, project_id: str, creds: dict, get_object_fn) -> None:
+    """Worker thread for POST .../merge_plan: owns its sync Mongo client, always clears the run's busy flag, and never
+    stores credentials (error text is scrubbed of them)."""
+    client = MongoClient(deployment_worker.MONGO_URL)
+    sync_db = client[deployment_worker.DB_NAME]
+
+    def progress(phase, done, total):
+        sync_db.merge_plans.update_one({"id": plan_id}, {"$set": {"progress": {"phase": phase, "done": done, "total": total}}})
+
+    try:
+        project = sync_db.projects.find_one({"id": project_id})
+        with ssh_helper.connect(creds["host"], creds["port"], creds["username"], creds.get("pem_key"), creds.get("password")) as ssh:
+            fields = merge_remote.build_plan(ssh, sync_db, plan_id, project=project, req=creds, get_object_fn=get_object_fn, progress=progress)
+        sync_db.merge_plans.update_one({"id": plan_id}, {"$set": {**fields, "status": "ready", "progress": None}})
+    except Exception as e:
+        sync_db.merge_plan_items.delete_many({"plan_id": plan_id})
+        sync_db.merge_plans.update_one({"id": plan_id}, {"$set": {
+            "status": "failed", "progress": None, "error": ssh_source.scrub(str(e), creds)[:1000]}})
+    finally:
+        sync_db.pipeline_runs.update_one({"id": run_id}, {"$set": {"busy": False}})
+        client.close()
 
 
 def register(s):
@@ -360,6 +388,66 @@ def register(s):
         except ssh_helper.SSHConnectionError as e:
             raise HTTPException(status_code=502, detail=str(e)[:2000])
 
+    @router.post("/pipeline/runs/{rid}/merge_plan", status_code=202)
+    async def create_merge_plan(rid: str, background: BackgroundTasks, current=Depends(get_current_user),
+                                body: dict = Body(default_factory=dict)):
+        """Read-only preview of merging this project's approved images into an existing server dataset: what would be
+        added, which labels would be updated, what is left alone. Nothing is written on the server. The pipeline is
+        busy while it is built (it reads and fingerprints the server)."""
+        run = await db.pipeline_runs.find_one({"id": rid})
+        if not run:
+            raise HTTPException(status_code=404, detail="Not found")
+        await s._project_access_check(run["project_id"], current["id"], roles=["owner", "admin"])
+        try:
+            req = MergePlanRequest(**body)
+        except ValidationError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid merge_plan request: {e}")
+        if abs(req.train_pct + req.valid_pct + req.test_pct - 1.0) > 1e-6:
+            raise HTTPException(status_code=400, detail="train_pct + valid_pct + test_pct must sum to 1.0")
+        busy_run = await db.pipeline_runs.find_one({"pipeline_id": run["pipeline_id"], "busy": True}, {"id": 1})
+        if busy_run:
+            raise HTTPException(status_code=409, detail=f"Pipeline busy: run {busy_run['id']} is currently in progress")
+        try:
+            await db.pipeline_runs.update_one({"id": rid}, {"$set": {"busy": True, "updated_at": datetime.now(timezone.utc).isoformat()}})
+        except DuplicateKeyError:
+            raise HTTPException(status_code=409, detail="Pipeline busy: another run is currently in progress")
+        plan_id = str(uuid.uuid4())
+        await db.merge_plans.insert_one({"id": plan_id, "run_id": rid, "project_id": run["project_id"], "status": "building",
+                                         "progress": None, "created_at": datetime.now(timezone.utc).isoformat()})
+        creds = req.model_dump()
+
+        async def _job():
+            await asyncio.to_thread(_build_plan_sync, plan_id, rid, run["project_id"], creds, s.get_object)
+
+        background.add_task(_job)
+        return {"plan_id": plan_id, "status": "building"}
+
+    @router.get("/pipeline/runs/{rid}/merge_plan")
+    async def get_merge_plan(rid: str, plan_id: str = None, current=Depends(get_current_user)):
+        run = await db.pipeline_runs.find_one({"id": rid}, {"project_id": 1})
+        if not run:
+            raise HTTPException(status_code=404, detail="Not found")
+        await s._project_access_check(run["project_id"], current["id"], roles=["owner", "admin"])
+        q = {"run_id": rid, **({"id": plan_id} if plan_id else {})}
+        plan = await db.merge_plans.find_one(q, {"_id": 0}, sort=[("created_at", -1)])
+        if not plan:
+            raise HTTPException(status_code=404, detail="No merge plan for this run")
+        if plan["status"] == "ready" and plan["expires_at"] < datetime.now(timezone.utc).isoformat():
+            plan["status"] = "expired"
+        return plan
+
+    @router.get("/pipeline/runs/{rid}/merge_plan/items")
+    async def list_merge_plan_items(rid: str, plan_id: str, category: str = None, limit: int = 100, skip: int = 0,
+                                    current=Depends(get_current_user)):
+        run = await db.pipeline_runs.find_one({"id": rid}, {"project_id": 1})
+        if not run:
+            raise HTTPException(status_code=404, detail="Not found")
+        await s._project_access_check(run["project_id"], current["id"], roles=["owner", "admin"])
+        if not await db.merge_plans.find_one({"id": plan_id, "run_id": rid}, {"id": 1}):
+            raise HTTPException(status_code=404, detail="Plan not found")
+        q = {"plan_id": plan_id, **({"category": category} if category else {})}
+        return await db.merge_plan_items.find(q, {"_id": 0, "plan_id": 0, "expected_others": 0}).sort("image_id", 1).skip(max(skip, 0)).to_list(min(max(limit, 1), 500))
+
     @router.post("/pipeline/runs/{rid}/stage/{stage}")
     async def run_stage(
         rid: str,
@@ -393,6 +481,15 @@ def register(s):
         if stage == "testing" and not any(t.get("status") == "succeeded" for t in run.get("video_tests", [])):
             raise HTTPException(status_code=400, detail="Run at least one video test first")
 
+        if stage == "uploading_data" and body.get("plan_id"):
+            plan = await db.merge_plans.find_one({"id": body["plan_id"], "run_id": rid}, {"_id": 0, "status": 1, "expires_at": 1})
+            if not plan:
+                raise HTTPException(status_code=400, detail="Unknown merge plan for this run")
+            if plan["status"] != "ready":
+                raise HTTPException(status_code=409, detail=f"The merge plan is '{plan['status']}', not ready to run. Preview the changes again.")
+            if plan["expires_at"] < datetime.now(timezone.utc).isoformat():
+                raise HTTPException(status_code=409, detail="The merge plan has expired. Preview the changes again.")
+
         busy_run = await db.pipeline_runs.find_one(
             {"pipeline_id": run["pipeline_id"], "busy": True}, {"id": 1}
         )
@@ -407,13 +504,17 @@ def register(s):
         now = datetime.now(timezone.utc).isoformat()
         history_index = len(run.get("stage_history", []))
         entry = {"stage": stage, "status": "running", "started_at": now}
-        await db.pipeline_runs.update_one(
-            {"id": rid},
-            {
-                "$set": {"busy": True, "status": stage, "updated_at": now},
-                "$push": {"stage_history": entry},
-            },
-        )
+        try:
+            await db.pipeline_runs.update_one(
+                {"id": rid},
+                {
+                    "$set": {"busy": True, "status": stage, "updated_at": now},
+                    "$push": {"stage_history": entry},
+                },
+            )
+        except DuplicateKeyError:
+            # two requests passed the check above at once: the unique partial index (one busy run per pipeline) lets one win
+            raise HTTPException(status_code=409, detail="Pipeline busy: another run is currently in progress")
 
         if stage == "class_check":
             try:

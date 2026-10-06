@@ -7,6 +7,8 @@ structural, not just a discipline followed by callers.
 import contextlib
 import io
 import os
+import posixpath
+import shlex
 import stat
 import time
 from typing import Callable, Optional, Tuple
@@ -193,6 +195,91 @@ def remote_rename(client: paramiko.SSHClient, old_path: str, new_path: str) -> N
         sftp.rename(old_path, new_path)
     finally:
         sftp.close()
+
+
+def list_files(sftp: paramiko.SFTPClient, remote_dir: str) -> list:
+    """[(name, size)] of the regular files directly inside remote_dir, over an already-open SFTP session
+    (one session for a whole dataset instead of one per call). A missing directory yields []."""
+    try:
+        entries = sftp.listdir_attr(remote_dir)
+    except FileNotFoundError:
+        return []
+    return [(e.filename, int(e.st_size or 0)) for e in entries if not stat.S_ISDIR(e.st_mode or 0)]
+
+
+# --- Remote content fingerprints and safe writes (used by the dataset merge) ---
+
+_PY_HASH = (
+    "import hashlib,os,sys\n"
+    "d=sys.argv[1]\n"
+    "for n in sorted(os.listdir(d)):\n"
+    "    p=os.path.join(d,n)\n"
+    "    if os.path.isfile(p):\n"
+    "        h=hashlib.sha256()\n"
+    "        with open(p,'rb') as f:\n"
+    "            for c in iter(lambda:f.read(1<<20),b''):\n"
+    "                h.update(c)\n"
+    "        print(h.hexdigest()+'\\t'+n)\n"
+)
+
+
+def probe_hash_tools(client: paramiko.SSHClient) -> dict:
+    """Which fingerprinting tools the server has: {"sha256sum": bool, "python3": bool}."""
+    _code, out, _err = exec_command(
+        client,
+        "command -v sha256sum >/dev/null 2>&1 && echo sha256sum; "
+        "command -v python3 >/dev/null 2>&1 && echo python3; true",
+    )
+    found = {line.strip() for line in out.splitlines()}
+    return {"sha256sum": "sha256sum" in found, "python3": "python3" in found}
+
+
+def remote_sha256(client: paramiko.SSHClient, remote_dir: str, tool: str) -> dict:
+    """{file name: sha256} for the regular files directly inside remote_dir, computed ON the server (nothing is
+    downloaded). tool is "sha256sum" or "python3". Names sha256sum has to escape (backslash/newline) are omitted."""
+    q = shlex.quote(remote_dir)
+    if tool == "sha256sum":
+        cmd = f"find {q} -maxdepth 1 -type f -print0 | xargs -0 -r sha256sum"
+    elif tool == "python3":
+        cmd = f"python3 -c {shlex.quote(_PY_HASH)} {q}"
+    else:
+        raise ValueError(f"unknown hash tool {tool!r}")
+    code, out, err = exec_command(client, cmd)
+    if code != 0:
+        raise SSHConnectionError(f"hashing {remote_dir} failed (exit {code}): {err.strip()[-200:]}")
+    hashes = {}
+    for line in out.splitlines():
+        if tool == "sha256sum":
+            digest, _sp, path = line.partition("  ")
+            if line.startswith("\\") or not path:
+                continue
+            name = posixpath.basename(path)
+        else:
+            digest, _tab, name = line.partition("\t")
+        if len(digest) == 64 and name:
+            hashes[name] = digest
+    return hashes
+
+
+def read_remote_bytes(sftp: paramiko.SFTPClient, remote_path: str, limit: int = 5 * 1024 * 1024) -> Optional[bytes]:
+    """Contents of a small remote file, or None if it does not exist. Refuses files over `limit`."""
+    try:
+        with sftp.open(remote_path, "rb") as f:
+            data = f.read(limit + 1)
+    except (FileNotFoundError, IOError):
+        return None
+    if len(data) > limit:
+        raise SSHConnectionError(f"{remote_path} is unexpectedly large")
+    return data
+
+
+def write_remote_atomic(sftp: paramiko.SFTPClient, remote_path: str, data: bytes) -> None:
+    """Write via a temp file in the same folder, then rename over the target, so a reader (or an interrupted run)
+    never sees a half-written file. The temp name does not end in an image/label extension."""
+    tmp = posixpath.join(posixpath.dirname(remote_path), f".{posixpath.basename(remote_path)}.tv-tmp")
+    with sftp.open(tmp, "wb") as f:
+        f.write(data)
+    sftp.posix_rename(tmp, remote_path)
 
 
 def upload_file(client: paramiko.SSHClient, local_path: str, remote_path: str,
