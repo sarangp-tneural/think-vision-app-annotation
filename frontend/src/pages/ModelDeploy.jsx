@@ -50,6 +50,10 @@ export default function ModelDeploy() {
   const canManage = myRole === "owner" || myRole === "admin";
   const canTrain = myRole !== "reviewer";
   const canActivate = (m) => canManage || (canTrain && m.user_id === me?.id && !m.source);
+  // The role arrives after first render, so a ?tab= link is resolved here rather than frozen at mount.
+  const wantedTab = ["real", "simulated", "pipeline"].includes(params.get("tab")) ? params.get("tab") : "real";
+  const [pickedTab, setPickedTab] = useState(null);
+  const activeTab = pickedTab ?? (canManage || wantedTab === "real" ? wantedTab : "real");
   const [editModelName, setEditModelName] = useState("");
 
   const load = async () => {
@@ -265,7 +269,7 @@ export default function ModelDeploy() {
           )}
         </div>
 
-        <Tabs defaultValue={["real", "simulated", "pipeline"].includes(params.get("tab")) && (canManage || params.get("tab") === "real") ? params.get("tab") : "real"} className="space-y-6">
+        <Tabs value={activeTab} onValueChange={setPickedTab} className="space-y-6">
           <TabsList className="bg-transparent border border-[#27272A] rounded-sm p-0 h-auto">
             <TabsTrigger value="real" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-real-training">
               <Zap className="w-3 h-3 mr-2" /> Model Training
