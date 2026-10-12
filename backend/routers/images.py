@@ -138,6 +138,8 @@ def register(s):
                 if role in ("owner", "admin") else {"project_id": pid, **mine}
         elif mode == "review":
             q = {"project_id": pid, "review_status": "submitted"}
+            if await s._role_in_project(project, me) not in ("owner", "admin"):  # images given to another reviewer aren't mine
+                q["$or"] = [{"reviewer_id": {"$in": [None, ""]}}, {"reviewer_id": me}]
             tid = project.get("team_id")
             if tid and await s._has_other_reviewer(tid, me):  # can't review own work, so don't land on it
                 q["annotated_by"] = {"$ne": me}
@@ -186,6 +188,8 @@ def register(s):
         project = await db.projects.find_one({"id": img["project_id"]}, {"name": 1, "team_id": 1})
         if project and project.get("team_id"):
             reviewers = await db.team_members.find({"team_id": project["team_id"], "role": {"$in": ["owner", "admin", "reviewer"]}, "status": "active"}).to_list(50)
+            if img.get("reviewer_id"):  # someone was picked to review it: don't ping the rest of the pool
+                reviewers = [r for r in reviewers if r["user_id"] == img["reviewer_id"]]
             for r in reviewers:
                 if r["user_id"] != actor_id:
                     await s._notify(r["user_id"], "review_needed", f"Image submitted for review in '{project['name']}'", project_id=img["project_id"], image_id=img["id"])
@@ -234,6 +238,8 @@ def register(s):
             m = await s._get_membership(tid, current["id"])
             if not m or m["role"] not in ["owner", "admin", "reviewer"]:
                 raise HTTPException(status_code=403, detail="Only owners/admins/reviewers can review")
+            if img.get("reviewer_id") and img["reviewer_id"] != current["id"] and m["role"] not in ["owner", "admin"]:
+                raise HTTPException(status_code=403, detail="This image is assigned to another reviewer")
         else:
             await s._project_access_check(img["project_id"], current["id"])
         if payload.decision not in ["approve", "reject"]:

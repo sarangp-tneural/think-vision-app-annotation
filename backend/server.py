@@ -284,6 +284,17 @@ class BulkAssignIn(BaseModel):
     due_date: Optional[str] = None
     notes: Optional[str] = ""
 
+class BulkSplitAssignIn(BaseModel):
+    image_ids: List[str]  # in the order the user sees them; blocks are cut from this order
+    user_ids: List[str]
+    priority: Optional[str] = None  # low | medium | high
+    due_date: Optional[str] = None
+    notes: Optional[str] = None
+
+class BulkAssignReviewIn(BaseModel):
+    image_ids: List[str]  # in the order the user sees them
+    user_ids: List[str]  # one = assign all to them, several = split evenly, empty = back to the shared pool
+
 class CommentIn(BaseModel):
     text: str
 
@@ -1071,6 +1082,91 @@ async def bulk_assign_images(pid: str, payload: BulkAssignIn, current=Depends(ge
     if payload.user_id:
         await _notify(payload.user_id, "image_assigned", f"{result.modified_count} image(s) assigned to you in '{p['name']}'", project_id=pid)
     return {"updated": result.modified_count}
+
+
+def _split_evenly(items: list, k: int) -> list:
+    """Cut items into k consecutive blocks whose sizes differ by at most one (10/3 -> 4,3,3)."""
+    base, extra = divmod(len(items), k)
+    out, start = [], 0
+    for idx in range(k):
+        size = base + (1 if idx < extra else 0)
+        out.append(items[start:start + size])
+        start += size
+    return out
+
+
+@api_router.post("/projects/{pid}/images/bulk-assign-split")
+async def bulk_assign_split(pid: str, payload: BulkSplitAssignIn, current=Depends(get_current_user)):
+    """Divide the images evenly between the chosen members, in the given order:
+    10 images / 3 members -> 4/3/3, each member gets one consecutive block."""
+    p = await _project_access_check(pid, current["id"], roles=["owner", "admin"])
+    user_ids = list(dict.fromkeys(payload.user_ids))
+    if not user_ids:
+        raise HTTPException(status_code=400, detail="Pick at least one member")
+    tid = p.get("team_id")
+    if tid:
+        found = await db.team_members.distinct("user_id", {"team_id": tid, "user_id": {"$in": user_ids}, "status": "active"})
+        if len(found) != len(user_ids):
+            raise HTTPException(status_code=400, detail="User not on team")
+    docs = await db.images.find({"id": {"$in": payload.image_ids}, "project_id": pid}, {"id": 1, "review_status": 1}).to_list(len(payload.image_ids) or 1)
+    status_by_id = {d["id"]: d.get("review_status") for d in docs}
+    ordered = list(dict.fromkeys(i for i in payload.image_ids if i in status_by_id))
+    # Locked images (under review / approved) can't be reassigned; drop them first so the split stays even.
+    open_ids = [i for i in ordered if status_by_id[i] not in LOCKED_STATUSES]
+    common = {"review_status": "assigned"}
+    if payload.priority:
+        common["priority"] = payload.priority
+    if payload.due_date is not None:
+        common["due_date"] = payload.due_date
+    if payload.notes is not None:
+        common["task_notes"] = payload.notes
+    assignments = []
+    for uid, chunk in zip(user_ids, _split_evenly(open_ids, len(user_ids))):
+        if not chunk:
+            continue
+        res = await db.images.update_many(
+            {"id": {"$in": chunk}, "project_id": pid, "review_status": {"$nin": list(LOCKED_STATUSES)}},
+            {"$set": {**common, "assigned_to": uid}})
+        assignments.append({"user_id": uid, "count": res.modified_count})
+        if uid != current["id"] and res.modified_count:
+            await _notify(uid, "image_assigned", f"{res.modified_count} image(s) assigned to you in '{p['name']}'", project_id=pid)
+    total = sum(a["count"] for a in assignments)
+    await _log_activity(pid, current["id"], "bulk_assigned", {"count": total, "user_ids": user_ids, "split": True})
+    return {"updated": total, "skipped_locked": len(ordered) - len(open_ids), "assignments": assignments}
+
+
+@api_router.post("/projects/{pid}/images/bulk-assign-review")
+async def bulk_assign_review(pid: str, payload: BulkAssignReviewIn, current=Depends(get_current_user)):
+    """Choose who reviews the images (one reviewer, or an even split in the given order). Once an image has a
+    reviewer only they and owners/admins can review it; images without one stay in the shared pool."""
+    p = await _project_access_check(pid, current["id"], roles=["owner", "admin"])
+    user_ids = list(dict.fromkeys(payload.user_ids))
+    tid = p.get("team_id")
+    if user_ids and tid:
+        found = await db.team_members.distinct("user_id", {"team_id": tid, "user_id": {"$in": user_ids}, "status": "active",
+                                                           "role": {"$in": ["owner", "admin", "reviewer"]}})
+        if len(found) != len(user_ids):
+            raise HTTPException(status_code=400, detail="Reviewers must be active owners, admins or reviewers on the team")
+    docs = await db.images.find({"id": {"$in": payload.image_ids}, "project_id": pid}, {"id": 1, "review_status": 1}).to_list(len(payload.image_ids) or 1)
+    status_by_id = {d["id"]: d.get("review_status") for d in docs}
+    ordered = list(dict.fromkeys(i for i in payload.image_ids if i in status_by_id))
+    open_ids = [i for i in ordered if status_by_id[i] != "approved"]  # approved images are done, nothing left to review
+    flt = lambda ids: {"id": {"$in": ids}, "project_id": pid, "review_status": {"$ne": "approved"}}
+    assignments = []
+    if not user_ids:
+        res = await db.images.update_many(flt(open_ids), {"$set": {"reviewer_id": None}})
+        total = res.modified_count
+    else:
+        for uid, chunk in zip(user_ids, _split_evenly(open_ids, len(user_ids))):
+            if not chunk:
+                continue
+            res = await db.images.update_many(flt(chunk), {"$set": {"reviewer_id": uid}})
+            assignments.append({"user_id": uid, "count": res.modified_count})
+            if uid != current["id"] and res.modified_count:
+                await _notify(uid, "review_assigned", f"{res.modified_count} image(s) assigned to you for review in '{p['name']}'", project_id=pid)
+        total = sum(a["count"] for a in assignments)
+    await _log_activity(pid, current["id"], "bulk_review_assigned", {"count": total, "user_ids": user_ids})
+    return {"updated": total, "skipped_approved": len(ordered) - len(open_ids), "assignments": assignments}
 
 
 @api_router.patch("/images/{img_id}/task")

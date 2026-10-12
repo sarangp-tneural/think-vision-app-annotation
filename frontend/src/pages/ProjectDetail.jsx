@@ -52,6 +52,9 @@ export default function ProjectDetail() {
   const lastSelectedIdRef = useRef(null);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkUser, setBulkUser] = useState("");
+  const [bulkMode, setBulkMode] = useState("single"); // "single" | "split"
+  const [bulkFor, setBulkFor] = useState("annotate"); // "annotate" | "review"
+  const [bulkSplitUsers, setBulkSplitUsers] = useState([]);
   const [bulkPriority, setBulkPriority] = useState("");
   const [bulkNotes, setBulkNotes] = useState("");
   // Assign project dialog
@@ -896,9 +899,60 @@ export default function ProjectDetail() {
                       </Button>
                     </DialogTrigger>                    <DialogContent className="bg-[#121212] border-[#27272A] rounded-sm">
                       <DialogHeader>
-                        <DialogTitle className="font-heading tracking-tight">Assign {selectedIds.size} images</DialogTitle>
+                        <DialogTitle className="font-heading tracking-tight">{bulkFor === "review" ? "Assign review of" : "Assign"} {selectedIds.size} images</DialogTitle>
                       </DialogHeader>
                       <div className="space-y-4 py-2">
+                        <div className="flex border border-[#27272A] rounded-sm overflow-hidden text-xs uppercase tracking-[0.2em]">
+                          {[["annotate", "Annotation"], ["review", "Review"]].map(([f, label]) => (
+                            <button key={f} type="button" onClick={() => { setBulkFor(f); setBulkUser(""); setBulkSplitUsers([]); }}
+                              className={`flex-1 py-2 transition-colors ${bulkFor === f ? "bg-primary text-black font-bold" : "text-muted-foreground hover:text-primary"}`}
+                              data-testid={`bulk-for-${f}`}>{label}</button>
+                          ))}
+                        </div>
+                        <div className="flex border border-[#27272A] rounded-sm overflow-hidden text-xs uppercase tracking-[0.2em]">
+                          {[["single", "Assign to one"], ["split", "Split between members"]].map(([mode, label]) => (
+                            <button key={mode} type="button" onClick={() => setBulkMode(mode)}
+                              className={`flex-1 py-2 transition-colors ${bulkMode === mode ? "bg-primary text-black font-bold" : "text-muted-foreground hover:text-primary"}`}
+                              data-testid={`bulk-mode-${mode}`}>{label}</button>
+                          ))}
+                        </div>
+                        {bulkMode === "split" ? (() => {
+                          const reviewing = bulkFor === "review";
+                          const pool = reviewing ? members.filter((m) => ["owner", "admin", "reviewer"].includes(m.role)) : members;
+                          const firstRole = reviewing ? "reviewer" : "annotator";
+                          const rank = (r) => (r === firstRole ? 0 : r === (reviewing ? "admin" : "reviewer") ? 1 : 2);
+                          const sorted = [...pool].sort((a, b) => rank(a.role) - rank(b.role));
+                          const k = bulkSplitUsers.length;
+                          const base = k ? Math.floor(selectedIds.size / k) : 0;
+                          const extra = k ? selectedIds.size % k : 0;
+                          const countFor = (uid) => { const i = bulkSplitUsers.indexOf(uid); return i < 0 ? 0 : base + (i < extra ? 1 : 0); };
+                          const roleIds = pool.filter((m) => m.role === firstRole).map((m) => m.user_id);
+                          return (
+                            <div>
+                              <div className="flex items-center justify-between mb-2">
+                                <Label className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Members</Label>
+                                <div className="flex gap-3 text-[10px] uppercase tracking-[0.15em]">
+                                  <button type="button" className="text-primary hover:underline" onClick={() => setBulkSplitUsers(roleIds)} data-testid="bulk-split-all-annotators">All {firstRole}s</button>
+                                  <button type="button" className="text-muted-foreground hover:underline" onClick={() => setBulkSplitUsers([])}>Clear</button>
+                                </div>
+                              </div>
+                              <div className="border border-[#27272A] max-h-48 overflow-y-auto divide-y divide-[#27272A]">
+                                {sorted.map((m) => (
+                                  <label key={m.user_id} className="flex items-center gap-3 px-3 py-2 text-sm cursor-pointer hover:bg-[#1C1C1C]">
+                                    <input type="checkbox" checked={bulkSplitUsers.includes(m.user_id)}
+                                      onChange={(e) => setBulkSplitUsers(e.target.checked ? [...bulkSplitUsers, m.user_id] : bulkSplitUsers.filter((u) => u !== m.user_id))}
+                                      data-testid={`bulk-split-member-${m.user_id}`} />
+                                    <span className="flex-1">{m.name} <span className="text-muted-foreground">({m.role})</span></span>
+                                    {bulkSplitUsers.includes(m.user_id) && <span className="text-xs text-primary">{countFor(m.user_id)}</span>}
+                                  </label>
+                                ))}
+                              </div>
+                              <p className="text-xs text-muted-foreground mt-2" data-testid="bulk-split-preview">
+                                {k === 0 ? "Tick members to split between" : `${selectedIds.size} images → ${k} member${k !== 1 ? "s" : ""}: ${bulkSplitUsers.map(countFor).join(" / ")}`}
+                              </p>
+                            </div>
+                          );
+                        })() : (
                         <div>
                           <Label className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2 block">Assignee</Label>
                           <Select value={bulkUser} onValueChange={setBulkUser}>
@@ -906,12 +960,14 @@ export default function ProjectDetail() {
                               <SelectValue placeholder="Choose member" />
                             </SelectTrigger>
                             <SelectContent className="bg-[#121212] border-[#27272A] rounded-sm">
-                              {members.map((m) => (
+                              {(bulkFor === "review" ? members.filter((m) => ["owner", "admin", "reviewer"].includes(m.role)) : members).map((m) => (
                                 <SelectItem key={m.user_id} value={m.user_id}>{m.name} ({m.role})</SelectItem>
                               ))}
                             </SelectContent>
                           </Select>
                         </div>
+                        )}
+                        {bulkFor === "annotate" && (<>
                         <div>
                           <Label className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2 block">Priority</Label>
                           <Select value={bulkPriority} onValueChange={setBulkPriority}>
@@ -929,22 +985,60 @@ export default function ProjectDetail() {
                           <Label className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2 block">Task notes</Label>
                           <Input value={bulkNotes} onChange={(e) => setBulkNotes(e.target.value)} placeholder="Optional instructions" className="rounded-sm bg-transparent border-[#27272A] focus-visible:ring-primary" data-testid="bulk-notes-input" />
                         </div>
+                        </>)}
+                        {bulkFor === "review" && (
+                          <p className="text-xs text-muted-foreground">Only the chosen reviewer (and owners/admins) can review these images. Images that are already approved are skipped.</p>
+                        )}
                       </div>
                       <DialogFooter>
                         <Button
                           onClick={async () => {
-                            if (!bulkUser) { toast.error("Pick a member"); return; }
+                            const split = bulkMode === "split";
+                            if (split ? bulkSplitUsers.length === 0 : !bulkUser) { toast.error("Pick a member"); return; }
                             try {
-                              const { data } = await api.post(`/projects/${pid}/images/bulk-assign`, {
-                                image_ids: Array.from(selectedIds),
-                                user_id: bulkUser,
-                                priority: bulkPriority || undefined,
-                                notes: bulkNotes || undefined,
-                              });
-                              toast.success(`Assigned ${data.updated} image${data.updated !== 1 ? "s" : ""}`);
+                              let data;
+                              if (bulkFor === "review") {
+                                // Grid order, so each reviewer's block matches what the user sees.
+                                const shownIds = images
+                                  .filter((img) => statusFilter === "all" || (img.review_status || "unassigned") === statusFilter)
+                                  .map((img) => img.id).filter((id) => selectedIds.has(id));
+                                const shownSet = new Set(shownIds);
+                                selectedIds.forEach((id) => { if (!shownSet.has(id)) shownIds.push(id); });
+                                ({ data } = await api.post(`/projects/${pid}/images/bulk-assign-review`, {
+                                  image_ids: shownIds,
+                                  user_ids: split ? bulkSplitUsers : [bulkUser],
+                                }));
+                              } else if (split) {
+                                // Grid order, so each member's block matches what the user sees.
+                                const orderedIds = images
+                                  .filter((img) => statusFilter === "all" || (img.review_status || "unassigned") === statusFilter)
+                                  .map((img) => img.id).filter((id) => selectedIds.has(id));
+                                // Selected images hidden by the status filter go last so none are dropped.
+                                const shown = new Set(orderedIds);
+                                selectedIds.forEach((id) => { if (!shown.has(id)) orderedIds.push(id); });
+                                ({ data } = await api.post(`/projects/${pid}/images/bulk-assign-split`, {
+                                  image_ids: orderedIds,
+                                  user_ids: bulkSplitUsers,
+                                  priority: bulkPriority || undefined,
+                                  notes: bulkNotes || undefined,
+                                }));
+                              } else {
+                                ({ data } = await api.post(`/projects/${pid}/images/bulk-assign`, {
+                                  image_ids: Array.from(selectedIds),
+                                  user_id: bulkUser,
+                                  priority: bulkPriority || undefined,
+                                  notes: bulkNotes || undefined,
+                                }));
+                              }
+                              toast.success(bulkFor === "review"
+                                ? `${data.updated} image${data.updated !== 1 ? "s" : ""} assigned for review`
+                                : split
+                                ? `Assigned ${data.updated} image${data.updated !== 1 ? "s" : ""} across ${data.assignments.length} member${data.assignments.length !== 1 ? "s" : ""}`
+                                : `Assigned ${data.updated} image${data.updated !== 1 ? "s" : ""}`);
                               setSelectedIds(new Set());
                               setBulkOpen(false);
                               setBulkUser(""); setBulkPriority(""); setBulkNotes("");
+                              setBulkMode("single"); setBulkSplitUsers([]); setBulkFor("annotate");
                               load();
                             } catch (e) { toast.error(e.response?.data?.detail || "Assign failed"); }
                           }}
@@ -1189,7 +1283,7 @@ export default function ProjectDetail() {
                             </div>
                           )}
                           {badgeMeta && (
-                            <div className={`absolute bottom-2 left-2 px-1.5 py-0.5 text-[9px] uppercase tracking-wider flex items-center gap-1 ${badgeMeta.color}`} title={`Status: ${rs}`} data-testid={`status-badge-${img.id}`}>
+                            <div className={`absolute bottom-2 left-2 px-1.5 py-0.5 text-[9px] uppercase tracking-wider flex items-center gap-1 ${badgeMeta.color}`} title={`Status: ${rs}${img.reviewer_id ? ` · Reviewer: ${members.find((m) => m.user_id === img.reviewer_id)?.name || "assigned"}` : ""}`} data-testid={`status-badge-${img.id}`}>
                               <Icon className="w-2.5 h-2.5" /> {rs === "submitted" ? "review" : rs}
                             </div>
                           )}

@@ -150,6 +150,59 @@ def test_only_admins_assign_and_bulk_assign_skips_locked(client, db, world):
     assert db.images.find_one({"id": locked})["review_status"] == "submitted"
 
 
+def test_bulk_assign_split_divides_in_order_and_skips_locked(client, db, world):
+    ids = [_img(db, world) for _ in range(5)]
+    locked = _img(db, world, assigned_to=world["ann_id"], review_status="submitted", annotations=[BOX], annotated=True)
+    url = f"/api/projects/{world['pid']}/images/bulk-assign-split"
+    body = {"image_ids": ids[:3] + [locked] + ids[3:], "user_ids": [world["ann_id"], world["ann2_id"]]}
+    assert client.post(url, json=body, headers=world["ann"]).status_code == 403
+    r = client.post(url, json=body, headers=world["owner"])
+    assert r.status_code == 200, r.text
+    assert r.json()["updated"] == 5 and r.json()["skipped_locked"] == 1
+    owners = [db.images.find_one({"id": i})["assigned_to"] for i in ids]
+    assert owners == [world["ann_id"]] * 3 + [world["ann2_id"]] * 2  # 3/2, consecutive blocks
+    assert all(db.images.find_one({"id": i})["review_status"] == "assigned" for i in ids)
+    assert db.images.find_one({"id": locked})["review_status"] == "submitted"
+
+
+def test_bulk_assign_split_validates_members(client, db, world):
+    iid = _img(db, world)
+    url = f"/api/projects/{world['pid']}/images/bulk-assign-split"
+    assert client.post(url, json={"image_ids": [iid], "user_ids": []}, headers=world["owner"]).status_code == 400
+    assert client.post(url, json={"image_ids": [iid], "user_ids": ["nobody"]}, headers=world["owner"]).status_code == 400
+    # fewer images than members: only the first members get one each
+    two = [_img(db, world), _img(db, world)]
+    r = client.post(url, json={"image_ids": two, "user_ids": [world["ann_id"], world["ann2_id"], world["rev_id"]]}, headers=world["owner"])
+    assert [a["count"] for a in r.json()["assignments"]] == [1, 1]
+
+
+def test_bulk_assign_review_split_and_who_can_review(client, db, world):
+    rev2_id, rev2 = _register(client, "rev2")
+    assert client.post(f"/api/teams/{world['tid']}/invite", json={"email": "rev2@example.com", "role": "reviewer"},
+                       headers=world["owner"]).status_code == 200
+    ids = [_img(db, world, assigned_to=world["ann_id"], review_status="submitted", annotations=[BOX], annotated=True) for _ in range(3)]
+    done = _img(db, world, assigned_to=world["ann_id"], review_status="approved", annotations=[BOX], annotated=True)
+    url = f"/api/projects/{world['pid']}/images/bulk-assign-review"
+    body = {"image_ids": ids + [done], "user_ids": [world["rev_id"], rev2_id]}
+    assert client.post(url, json=body, headers=world["rev"]).status_code == 403  # only owners/admins assign
+    assert client.post(url, json={"image_ids": ids, "user_ids": [world["ann_id"]]}, headers=world["owner"]).status_code == 400  # annotators can't review
+    r = client.post(url, json=body, headers=world["owner"])
+    assert r.status_code == 200, r.text
+    assert r.json()["updated"] == 3 and r.json()["skipped_approved"] == 1
+    assert [db.images.find_one({"id": i})["reviewer_id"] for i in ids] == [world["rev_id"], world["rev_id"], rev2_id]  # 2/1 blocks
+    assert db.images.find_one({"id": done}).get("reviewer_id") is None
+    # only the chosen reviewer (or an owner/admin) may review; the other reviewer is turned away
+    assert client.post(f"/api/images/{ids[0]}/review", json={"decision": "approve"}, headers=rev2).status_code == 403
+    assert client.post(f"/api/images/{ids[0]}/review", json={"decision": "approve"}, headers=world["rev"]).status_code == 200
+    assert client.post(f"/api/images/{ids[2]}/review", json={"decision": "approve"}, headers=world["owner"]).status_code == 200
+    # the review queue only offers me my images
+    nxt = client.get(f"/api/projects/{world['pid']}/images/next", params={"mode": "review"}, headers=rev2).json()["id"]
+    assert nxt is None or db.images.find_one({"id": nxt}).get("reviewer_id") in (None, "", rev2_id)
+    # an empty list returns the image to the shared pool
+    assert client.post(url, json={"image_ids": [ids[1]], "user_ids": []}, headers=world["owner"]).json()["updated"] == 1
+    assert client.post(f"/api/images/{ids[1]}/review", json={"decision": "approve"}, headers=rev2).status_code == 200
+
+
 def test_annotated_means_approved_everywhere(client, db, world):
     pid = world["pid"]
     before = client.get(f"/api/projects/{pid}", headers=world["owner"]).json()
