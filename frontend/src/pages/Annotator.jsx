@@ -16,7 +16,7 @@ import {
   Save, Sparkles, Trash2, ArrowLeft, ArrowRight, Undo2, Copy,
   Square, Hexagon, Slash, Dot, Circle as CircleIcon, Keyboard,
   ZoomIn, ZoomOut, Maximize2, Send, CheckCircle2, XCircle, UserPlus,
-  MessageSquare, Reply, Check, Pencil,
+  MessageSquare, Reply, Check, Pencil, RotateCw,
 } from "lucide-react";
 
 const COLORS = ["#06B6D4", "#D946EF", "#EAB308", "#22C55E", "#EF4444", "#F97316", "#3B82F6"];
@@ -179,6 +179,15 @@ export default function Annotator() {
     setDirty(true);
   };
 
+  // Set the selected bbox's rotation from degrees (normalised to 0-359).
+  const rotateSelected = (deg) => {
+    const b = boxes[selectedIdx];
+    if (!b || (b.type || "bbox") !== "bbox" || !Number.isFinite(deg)) return;
+    const next = boxes.slice();
+    next[selectedIdx] = { ...b, rotation: (((deg % 360) + 360) % 360) * Math.PI / 180 };
+    commitBoxes(next);
+  };
+
   const onMouseDown = (e) => {
     if (e.button !== 0) return;
     // Space+drag or middle mouse = pan
@@ -237,7 +246,8 @@ export default function Annotator() {
         const dx = (px - cxN) * rect.width;
         const dy = (py - cyN) * rect.height;
         // Angle from north (top of bbox); handle is above center by default
-        const rotation = Math.atan2(dx, -dy);
+        let rotation = Math.atan2(dx, -dy);
+        if (e.shiftKey) { const step = Math.PI / 12; rotation = Math.round(rotation / step) * step; }
         const next = boxes.slice();
         next[editing.idx] = { ...next[editing.idx], rotation };
         commitBoxes(next);
@@ -439,10 +449,19 @@ export default function Annotator() {
     if (e.key === "+" || e.key === "=") { zoomAt(1.2, window.innerWidth / 2, window.innerHeight / 2); return; }
     if (e.key === "-") { zoomAt(1 / 1.2, window.innerWidth / 2, window.innerHeight / 2); return; }
     if (e.key === "0") { resetView(); return; }
+    if (",.<>".includes(e.key) && !meta) {
+      const sel = boxes[selectedIdx];
+      if (sel && (sel.type || "bbox") === "bbox") {
+        e.preventDefault();
+        const deg = (e.key === "," || e.key === "<" ? -1 : 1) * (e.shiftKey ? 15 : 1);
+        rotateSelected(((sel.rotation || 0) * 180) / Math.PI + deg);
+      }
+      return;
+    }
     const t = TOOLS.find((tl) => tl.key.toLowerCase() === e.key.toLowerCase());
     if (t) { setActiveTool(t.id); cancelDrawing(); }
     // eslint-disable-next-line
-  }, [boxes, polyPoints, activeTool, zoom, pan]);
+  }, [boxes, selectedIdx, polyPoints, activeTool, zoom, pan]);
 
   const onKeyUp = useCallback((e) => {
     if (e.key === " ") setSpaceDown(false);
@@ -878,6 +897,7 @@ export default function Annotator() {
               <div className="flex items-center justify-between"><span>Next needing work</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">]</kbd></div>
               <div className="flex items-center justify-between"><span>Undo</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘Z</kbd></div>
               <div className="flex items-center justify-between"><span>Repeat previous</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⇧R</kbd></div>
+              <div className="flex items-center justify-between"><span>Rotate box 1° (⇧ 15°)</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">, .</kbd></div>
               <div className="flex items-center justify-between"><span>Finish polygon</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">↵</kbd></div>
               <div className="flex items-center justify-between"><span>Cancel</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">Esc</kbd></div>
             </div>
@@ -1041,34 +1061,41 @@ export default function Annotator() {
                       data-testid={`resize-${h.pos}-${i}`}
                     />
                   ))}
-                  {/* Rotate handle above the box */}
-                  {isSelected && (
-                    <>
-                      <div
-                        className="absolute w-px"
-                        style={{
-                          left: "50%",
-                          top: -18,
-                          height: 18,
-                          background: labelColor(b.label),
-                          pointerEvents: "none",
-                        }}
-                      />
-                      <div
-                        className="absolute w-3 h-3 rounded-full border-2 bg-[#050505]"
-                        style={{
-                          left: "50%",
-                          top: -22,
-                          transform: "translate(-50%, 0)",
-                          borderColor: labelColor(b.label),
-                          cursor: "grab",
-                          pointerEvents: "auto",
-                        }}
-                        onMouseDown={(e) => startEdit(e, i, "rotate")}
-                        data-testid={`rotate-${i}`}
-                      />
-                    </>
-                  )}
+                  {/* Rotate handle above the box (below it when too close to the top edge) */}
+                  {isSelected && !readOnly && (() => {
+                    const below = (b.y || 0) < 0.06;
+                    return (
+                      <>
+                        <div
+                          className="absolute w-px"
+                          style={{
+                            left: "50%",
+                            ...(below ? { bottom: -18 } : { top: -18 }),
+                            height: 18,
+                            background: labelColor(b.label),
+                            pointerEvents: "none",
+                          }}
+                        />
+                        <div
+                          className="absolute w-5 h-5 rounded-full border-2 bg-[#050505] flex items-center justify-center"
+                          style={{
+                            left: "50%",
+                            ...(below ? { bottom: -38 } : { top: -38 }),
+                            transform: "translate(-50%, 0)",
+                            borderColor: labelColor(b.label),
+                            color: labelColor(b.label),
+                            cursor: editing?.mode === "rotate" ? "grabbing" : "grab",
+                            pointerEvents: "auto",
+                          }}
+                          title="Drag to rotate (Shift = snap 15°)"
+                          onMouseDown={(e) => startEdit(e, i, "rotate")}
+                          data-testid={`rotate-${i}`}
+                        >
+                          <RotateCw className="w-3 h-3" />
+                        </div>
+                      </>
+                    );
+                  })()}
                 </div>
               );
             })}
@@ -1211,6 +1238,30 @@ export default function Annotator() {
               )}
             </div>
           </div>
+
+          {boxes[selectedIdx] && (boxes[selectedIdx].type || "bbox") === "bbox" && (
+            <div className="mb-6 pb-6 border-b border-[#27272A]" data-testid="rotation-panel">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2 flex items-center gap-2">
+                <RotateCw className="w-3 h-3" /> Box rotation
+              </div>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  step="1"
+                  disabled={readOnly}
+                  value={Math.round((((boxes[selectedIdx].rotation || 0) * 180) / Math.PI + 360) % 360)}
+                  onChange={(e) => rotateSelected(parseFloat(e.target.value))}
+                  className="rounded-sm bg-transparent border-[#27272A] h-8 text-xs"
+                  data-testid="rotation-input"
+                />
+                <span className="text-xs text-muted-foreground">°</span>
+                <Button size="sm" variant="outline" disabled={readOnly} onClick={() => rotateSelected(0)} className="rounded-sm h-8 text-xs border-[#27272A] bg-transparent" data-testid="rotation-reset-btn">
+                  Reset
+                </Button>
+              </div>
+              <div className="text-[10px] text-muted-foreground mt-2">Or drag the round handle on the box. Shift snaps to 15°.</div>
+            </div>
+          )}
 
           <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-3">
             Annotations ({boxes.length})
