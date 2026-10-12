@@ -48,6 +48,8 @@ export default function ProjectDetail() {
   const [myRole, setMyRole] = useState(null);
   // Bulk-select state
   const [selectedIds, setSelectedIds] = useState(new Set());
+  // Anchor for shift+click range selection (the last image clicked).
+  const lastSelectedIdRef = useRef(null);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkUser, setBulkUser] = useState("");
   const [bulkPriority, setBulkPriority] = useState("");
@@ -306,6 +308,26 @@ export default function ProjectDetail() {
   const onDrop = (e) => {
     e.preventDefault();
     upload(Array.from(e.dataTransfer.files).filter(f => f.type.startsWith("image/")));
+  };
+
+  // File-manager style selection: shift = range from the anchor (in the
+  // visible, filtered order), ctrl/cmd or plain checkbox click = toggle one.
+  const handleSelectClick = (e, img, filtered) => {
+    const anchorIdx = e.shiftKey && lastSelectedIdRef.current
+      ? filtered.findIndex((i) => i.id === lastSelectedIdRef.current)
+      : -1;
+    const next = new Set(selectedIds);
+    if (anchorIdx >= 0) {
+      e.preventDefault();
+      window.getSelection()?.removeAllRanges();
+      const clickedIdx = filtered.findIndex((i) => i.id === img.id);
+      const [from, to] = anchorIdx < clickedIdx ? [anchorIdx, clickedIdx] : [clickedIdx, anchorIdx];
+      for (let k = from; k <= to; k++) next.add(filtered[k].id);
+    } else {
+      if (next.has(img.id)) next.delete(img.id); else next.add(img.id);
+      lastSelectedIdRef.current = img.id;
+    }
+    setSelectedIds(next);
   };
 
   const askDelete = (ids, e) => {
@@ -957,6 +979,7 @@ export default function ProjectDetail() {
                     }}
                     className="rounded-sm border-[#27272A] bg-transparent hover:bg-[#1C1C1C] hover:border-primary hover:text-primary text-xs uppercase tracking-[0.2em] h-8"
                     data-testid="select-all-btn"
+                    title="Tip: Shift+click photos to select a range, Ctrl/Cmd+click to add or remove one"
                   >
                     {(() => {
                       const filtered = images.filter((img) => statusFilter === "all" || (img.review_status || "unassigned") === statusFilter);
@@ -1127,10 +1150,8 @@ export default function ProjectDetail() {
                       <div
                         key={img.id}
                         onClick={(e) => {
-                          if (e.shiftKey || canManage && selectedIds.size > 0) {
-                            const next = new Set(selectedIds);
-                            if (next.has(img.id)) next.delete(img.id); else next.add(img.id);
-                            setSelectedIds(next);
+                          if (canManage && (e.shiftKey || e.ctrlKey || e.metaKey || selectedIds.size > 0)) {
+                            handleSelectClick(e, img, filtered);
                           } else {
                             navigate(`/projects/${pid}/annotate/${img.id}`);
                           }
@@ -1144,9 +1165,7 @@ export default function ProjectDetail() {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              const next = new Set(selectedIds);
-                              if (next.has(img.id)) next.delete(img.id); else next.add(img.id);
-                              setSelectedIds(next);
+                              handleSelectClick(e, img, filtered);
                             }}
                             className={`absolute top-2 right-2 z-10 w-5 h-5 border transition-colors flex items-center justify-center ${
                               selectedIds.has(img.id) ? "bg-primary border-primary" : "bg-[#050505]/80 border-[#27272A] opacity-0 group-hover:opacity-100"
