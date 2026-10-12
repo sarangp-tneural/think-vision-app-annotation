@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import Navbar from "@/components/Navbar";
+import ProjectNameFields from "@/components/ProjectNameFields";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -17,6 +18,8 @@ export default function Teams() {
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [projectName, setProjectName] = useState("");
+  const [taskType, setTaskType] = useState("object_detection");
   const [creating, setCreating] = useState(false);
 
   const load = async () => {
@@ -34,9 +37,16 @@ export default function Teams() {
     setCreating(true);
     try {
       const { data } = await api.post("/teams", { name });
+      if (projectName.trim()) {
+        try {
+          await api.post("/projects", { name: projectName, task_type: taskType, team_id: data.id });
+        } catch (e) {
+          toast.error(e.response?.data?.detail || "Team created, but the project could not be created");
+        }
+      }
       toast.success("Team created");
       setOpen(false);
-      setName("");
+      setName(""); setProjectName(""); setTaskType("object_detection");
       navigate(`/teams/${data.id}`);
     } catch (e) {
       toast.error(e.response?.data?.detail || "Create failed");
@@ -82,6 +92,18 @@ export default function Teams() {
                     className="rounded-sm bg-transparent border-[#27272A] focus-visible:ring-primary"
                     data-testid="team-name-input"
                   />
+                </div>
+                <div className="border-t border-[#27272A] pt-4">
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-primary mb-3">
+                    First project (optional)
+                  </div>
+                  <ProjectNameFields
+                    name={projectName} onName={setProjectName}
+                    taskType={taskType} onTaskType={setTaskType} testIdPrefix="team-create"
+                  />
+                  <div className="text-xs text-muted-foreground mt-3">
+                    Images in a team project can be assigned to the team's members. You can add more projects inside the team.
+                  </div>
                 </div>
               </div>
               <DialogFooter>

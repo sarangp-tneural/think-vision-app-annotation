@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import Navbar from "@/components/Navbar";
+import ProjectNameFields from "@/components/ProjectNameFields";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -35,6 +36,10 @@ export default function TeamDetail() {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("member");
   const [inviting, setInviting] = useState(false);
+  const [projectOpen, setProjectOpen] = useState(false);
+  const [projectName, setProjectName] = useState("");
+  const [taskType, setTaskType] = useState("object_detection");
+  const [creatingProject, setCreatingProject] = useState(false);
 
   const load = async () => {
     try {
@@ -103,6 +108,22 @@ export default function TeamDetail() {
       navigate("/dashboard");
     } catch (e) {
       toast.error(e.response?.data?.detail || "Delete failed");
+    }
+  };
+
+  const createProject = async () => {
+    if (!projectName.trim()) return toast.error("Name required");
+    setCreatingProject(true);
+    try {
+      await api.post("/projects", { name: projectName, task_type: taskType, team_id: tid });
+      toast.success("Project created");
+      setProjectOpen(false);
+      setProjectName(""); setTaskType("object_detection");
+      load();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Create failed");
+    } finally {
+      setCreatingProject(false);
     }
   };
 
@@ -209,6 +230,69 @@ export default function TeamDetail() {
                 <Trash2 className="w-4 h-4 mr-2" /> Delete Team
               </Button>
             )}
+          </div>
+        </div>
+
+        {/* Projects */}
+        <div className="mb-10">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+              Projects ({(team.projects || []).length})
+            </div>
+            {myRole && myRole !== "annotator" && myRole !== "reviewer" && (
+              <Dialog open={projectOpen} onOpenChange={setProjectOpen}>
+                <DialogTrigger asChild>
+                  <Button
+                    variant="outline"
+                    className="rounded-sm border-[#27272A] bg-transparent hover:bg-[#1C1C1C] hover:border-primary hover:text-primary text-xs uppercase tracking-[0.2em]"
+                    data-testid="team-add-project-btn"
+                  >
+                    <Plus className="w-4 h-4 mr-2" /> Add Project
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="bg-[#121212] border-[#27272A] rounded-sm">
+                  <DialogHeader>
+                    <DialogTitle className="font-heading tracking-tight">New project in {team.name}</DialogTitle>
+                  </DialogHeader>
+                  <div className="py-2">
+                    <ProjectNameFields
+                      name={projectName} onName={setProjectName}
+                      taskType={taskType} onTaskType={setTaskType} testIdPrefix="team-detail"
+                    />
+                  </div>
+                  <DialogFooter>
+                    <Button
+                      onClick={createProject}
+                      disabled={creatingProject}
+                      className="rounded-sm bg-primary text-black hover:bg-cyan-400 text-xs uppercase tracking-[0.2em] font-bold"
+                      data-testid="team-project-submit-btn"
+                    >
+                      {creatingProject ? "Creating..." : "Create Project"}
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            )}
+          </div>
+          <div className="border-t border-[#27272A]">
+            {(team.projects || []).length === 0 && (
+              <div className="border-b border-[#27272A] p-4 text-xs text-muted-foreground">
+                No projects yet. Add one so members can be assigned images.
+              </div>
+            )}
+            {(team.projects || []).map((p) => (
+              <Link
+                key={p.id}
+                to={`/projects/${p.id}`}
+                className="border-b border-[#27272A] p-4 flex items-center justify-between panel-hover"
+                data-testid={`team-project-row-${p.id}`}
+              >
+                <div className="font-heading font-medium text-sm">{p.name}</div>
+                <div className="text-xs text-muted-foreground">
+                  {(p.task_type || "object_detection").replace("_", " ")} · {p.image_count} images
+                </div>
+              </Link>
+            ))}
           </div>
         </div>
 

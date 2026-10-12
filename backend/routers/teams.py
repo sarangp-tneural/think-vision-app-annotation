@@ -59,7 +59,10 @@ def register(s):
                     enriched.append({**m, "email": u["email"], "name": u["name"]})
             else:
                 enriched.append({**m, "email": m.get("invited_email", ""), "name": "(pending)"})
-        return {**team, "members": enriched}
+        projects = await db.projects.find({"team_id": tid}, {"_id": 0, "id": 1, "name": 1, "task_type": 1}).to_list(500)
+        for p in projects:
+            p["image_count"] = await db.images.count_documents({"project_id": p["id"]})
+        return {**team, "members": enriched, "projects": projects}
 
     @router.patch("/teams/{tid}")
     async def rename_team(tid: str, payload: s.TeamUpdate, current=Depends(get_current_user)):
