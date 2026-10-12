@@ -196,3 +196,24 @@ The backend calls Emergent's hosted services in two places, both authenticated w
 - **Image and model storage** via `https://integrations.emergentagent.com/objstore`
 
 Both stop working if the key expires or runs out of credit. To run fully self-hosted, replace them with the `google-genai` SDK and local or S3 storage.
+
+
+
+For future branch changes
+You can use this simple sequence:
+
+cd ~/Desktop/think-vision
+
+git checkout <branch-name>
+git pull
+
+cd frontend
+yarn install
+yarn build
+
+sudo rm -rf /var/www/thinkvision/*
+sudo cp -r build/* /var/www/thinkvision/
+sudo chown -R www-data:www-data /var/www/thinkvision
+
+sudo nginx -t
+sudo systemctl reload nginx
