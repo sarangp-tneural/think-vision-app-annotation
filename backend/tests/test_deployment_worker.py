@@ -550,7 +550,7 @@ def test_two_deploys_plus_rollback_rotate_backups_correctly():
             assert run_a["status"] == "completed"
             assert run_a["deploy"]["current_became_bak1"] is True
             assert run_a["deploy"]["bak1_became_bak2"] is False
-            assert run_a["deploy"]["bak2_dropped"] is False
+            assert run_a["deploy"]["oldest_backup_dropped"] is False
             assert db.models.find_one({"id": mid_a})["is_active"] is True
 
             # --- Deploy B: full three-way rotation ---
@@ -565,7 +565,7 @@ def test_two_deploys_plus_rollback_rotate_backups_correctly():
             run_b = db.pipeline_runs.find_one({"id": rid_b})
             assert run_b["deploy"]["current_became_bak1"] is True
             assert run_b["deploy"]["bak1_became_bak2"] is True
-            assert run_b["deploy"]["bak2_dropped"] is False
+            assert run_b["deploy"]["oldest_backup_dropped"] is False
             # B's activation deactivates A
             assert db.models.find_one({"id": mid_a})["is_active"] is False
             assert db.models.find_one({"id": mid_b})["is_active"] is True

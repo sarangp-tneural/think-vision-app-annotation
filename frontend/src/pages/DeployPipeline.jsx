@@ -149,7 +149,7 @@ export default function DeployPipeline({ pid, project }) {
     remote_base_model_path: "", remote_production_model_path: "",
     train_pct: 0.7, valid_pct: 0.2, test_pct: 0.1, epochs: 30,
     env_mode: "system", venv_path: "",
-    model_choice: "yolo", yolo_model: "yolov8n.pt",
+    model_choice: "auto", yolo_model: "yolov8n.pt",
     dataset_mode: "new", existing_data_yaml_path: "", extra_yaml_path: "",
     label_format: "auto", // merge preview: the server dataset's label format (auto = recorded at import, else sampled)
   });
@@ -164,6 +164,9 @@ export default function DeployPipeline({ pid, project }) {
   // Numeric fields come off <input> as strings; coerce before every request
   // body so the backend's Pydantic int/float fields don't have to guess.
   const NUMERIC_FIELDS = ["port", "epochs", "train_pct", "valid_pct", "test_pct"];
+  // "auto": merge runs continue from the deployed model, the first run starts from a YOLO model.
+  const modelChoice = fields.model_choice !== "auto" ? fields.model_choice
+    : (pipelineData?.runs?.find((r) => r.id === selectedRunId)?.run_type === "merge" ? "production" : "yolo");
   const buildBody = () => {
     const body = { ...fields };
     for (const key of NUMERIC_FIELDS) if (body[key] !== "") body[key] = Number(body[key]);
@@ -184,8 +187,9 @@ export default function DeployPipeline({ pid, project }) {
       body.update_class_names = mergeFlags.update_class_names;
     }
     body.hyperparams = hyper;
-    body.start_from_path = body.model_choice !== "yolo" ? body.model_choice : "";
-    body.yolo_model = body.model_choice === "yolo" ? body.yolo_model : "";
+    body.start_from_path = modelChoice === "production" ? body.remote_production_model_path
+      : modelChoice !== "yolo" ? modelChoice : "";
+    body.yolo_model = modelChoice === "yolo" ? body.yolo_model : "";
     return body;
   };
 
@@ -731,6 +735,19 @@ export default function DeployPipeline({ pid, project }) {
                 >
                   Scan server for existing models
                 </Button>
+                <label className="flex items-start gap-2 text-xs cursor-pointer">
+                  <input
+                    type="radio" name="model_choice" className="accent-primary mt-0.5"
+                    checked={modelChoice === "production"}
+                    onChange={() => setFields((f) => ({ ...f, model_choice: "production" }))}
+                  />
+                  <span>
+                    Continue from the deployed model
+                    <code className="block text-primary break-all">
+                      {fields.remote_production_model_path || `${(fields.remote_workdir || "<workdir>").replace(/\/+$/, "")}/models/production.pt`}
+                    </code>
+                  </span>
+                </label>
                 {remoteInfo?.models?.length > 0 && (
                   <div className="space-y-2" data-testid={T.modelChoiceRadio}>
                     <div className="text-[10px] text-muted-foreground">Continue training from a model already on the server:</div>
@@ -738,7 +755,7 @@ export default function DeployPipeline({ pid, project }) {
                       <label key={m.path} className="flex items-start gap-2 text-xs cursor-pointer">
                         <input
                           type="radio" name="model_choice" className="accent-primary mt-0.5"
-                          checked={fields.model_choice === m.path}
+                          checked={modelChoice === m.path}
                           onChange={() => setFields((f) => ({ ...f, model_choice: m.path }))}
                         />
                         <span>
@@ -757,12 +774,12 @@ export default function DeployPipeline({ pid, project }) {
                 <label className="flex items-center gap-2 text-xs cursor-pointer">
                   <input
                     type="radio" name="model_choice" className="accent-primary"
-                    checked={fields.model_choice === "yolo"}
+                    checked={modelChoice === "yolo"}
                     onChange={() => setFields((f) => ({ ...f, model_choice: "yolo" }))}
                   />
                   Start fresh from a YOLO model (downloaded on the server)
                 </label>
-                {fields.model_choice === "yolo" && (
+                {modelChoice === "yolo" && (
                   <select
                     value={fields.yolo_model} onChange={setField("yolo_model")}
                     className={`${inputClass} px-3 w-full md:w-64`} data-testid={T.yoloModelSelect}
@@ -806,7 +823,7 @@ export default function DeployPipeline({ pid, project }) {
       <div className="space-y-4">
         <div className="text-xs text-muted-foreground max-w-xl">
           Upload a trained model to the server that will use it. The current file there is kept as
-          <code className="text-primary"> .bak1</code> / <code className="text-primary">.bak2</code> before it is replaced.
+          <code className="text-primary"> .bak1</code> / <code className="text-primary">.bak2</code> / <code className="text-primary">.bak3</code> / <code className="text-primary">.bak4</code> before it is replaced.
         </div>
         {SSHFields({ vals: deploy, set: setDeployField, idSuffix: "-deploy" })}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

@@ -220,6 +220,8 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_KEEP_BACKUPS = 4  # previous deployed models kept on the server as .bak1 .. .bakN
+
 _PATH_KEYS = (
     "remote_workdir", "venv_path", "start_from_path", "existing_data_yaml_path",
     "remote_base_model_path", "remote_production_model_path",
@@ -902,19 +904,22 @@ def _pipeline_deploying_sync(run_id: str, project_id: str, history_index: int,
             f.write(data)
 
         prod = req["remote_production_model_path"]
-        bak1, bak2 = f"{prod}.bak1", f"{prod}.bak2"
-        deploy_info = {"current_became_bak1": False, "bak1_became_bak2": False, "bak2_dropped": False}
+        baks = [f"{prod}.bak{i}" for i in range(1, _KEEP_BACKUPS + 1)]
+        deploy_info = {"current_became_bak1": False, "bak1_became_bak2": False, "oldest_backup_dropped": False}
 
         with ssh_helper.connect(req["host"], req["port"], req["username"],
                                  req.get("pem_key"), req.get("password")) as client:
-            if ssh_helper.remote_exists(client, bak2):
-                ssh_helper.remote_remove(client, bak2)
-                deploy_info["bak2_dropped"] = True
-            if ssh_helper.remote_exists(client, bak1):
-                ssh_helper.remote_rename(client, bak1, bak2)
-                deploy_info["bak1_became_bak2"] = True
+            # Shift .bakN -> .bak(N+1), oldest first; the oldest falls off the end.
+            if ssh_helper.remote_exists(client, baks[-1]):
+                ssh_helper.remote_remove(client, baks[-1])
+                deploy_info["oldest_backup_dropped"] = True
+            for i in range(len(baks) - 2, -1, -1):
+                if ssh_helper.remote_exists(client, baks[i]):
+                    ssh_helper.remote_rename(client, baks[i], baks[i + 1])
+                    if i == 0:
+                        deploy_info["bak1_became_bak2"] = True
             if ssh_helper.remote_exists(client, prod):
-                ssh_helper.remote_rename(client, prod, bak1)
+                ssh_helper.remote_rename(client, prod, baks[0])
                 deploy_info["current_became_bak1"] = True
             ssh_helper.upload_file(client, local_candidate_pt, prod)
 
