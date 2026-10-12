@@ -88,6 +88,56 @@ def register(s):
         await db.teams.delete_one({"id": tid})
         return {"ok": True}
 
+    async def _plan_move(p: dict, tid: str, uid: str, member_ids: set) -> dict:
+        """What adding project `p` to team `tid` would do - the same numbers the real run applies."""
+        res = {"id": p["id"], "name": p["name"], "status": "ok", "unassigned_images": 0,
+               "removed_assignments": 0, "people_affected": 0}
+        src = p.get("team_id")
+        m = await s._get_membership(src, uid) if src else None
+        if (src and (not m or m["role"] not in ("owner", "admin"))) or (not src and p.get("user_id") != uid):
+            return {**res, "status": "forbidden", "reason": "You need to be owner or admin of the project's current team"}
+        if src == tid:
+            return {**res, "status": "skipped", "reason": "Already in this team"}
+        if await db.images.count_documents({"project_id": p["id"], "review_status": "submitted"}):
+            return {**res, "status": "blocked", "reason": "Images are waiting for review - finish reviewing first"}
+        stale = {"project_id": p["id"], "review_status": {"$nin": list(s.LOCKED_STATUSES)},
+                 "assigned_to": {"$nin": [None, ""] + list(member_ids)}}
+        gone = {"project_id": p["id"], "user_id": {"$nin": list(member_ids)}}
+        assignees = await db.images.distinct("assigned_to", stale)
+        removed = await db.project_assignments.distinct("user_id", gone)
+        return {**res, "unassigned_images": await db.images.count_documents(stale),
+                "removed_assignments": len(removed), "people_affected": len(set(assignees) | set(removed))}
+
+    @router.post("/teams/{tid}/projects/add")
+    async def add_projects_to_team(tid: str, payload: s.TeamAddProjects, current=Depends(get_current_user)):
+        """Moves existing projects into this team (a project has exactly one team)."""
+        await s._require_team_role(tid, current["id"], ["owner", "admin"])
+        members = await db.team_members.find({"team_id": tid, "status": "active"}).to_list(500)
+        member_ids = {m["user_id"] for m in members}
+        results = []
+        for pid in dict.fromkeys(payload.project_ids):
+            p = await db.projects.find_one({"id": pid})
+            if not p:
+                results.append({"id": pid, "name": "", "status": "forbidden", "reason": "Project not found"})
+                continue
+            plan = await _plan_move(p, tid, current["id"], member_ids)
+            if plan["status"] == "ok" and not payload.dry_run:
+                await db.images.update_many(
+                    {"project_id": pid, "review_status": {"$nin": list(s.LOCKED_STATUSES)},
+                     "assigned_to": {"$nin": [None, ""] + list(member_ids)}},
+                    {"$set": {"assigned_to": None, "review_status": "unassigned"}},
+                )
+                await db.project_assignments.delete_many({"project_id": pid, "user_id": {"$nin": list(member_ids)}})
+                await db.projects.update_one({"id": pid}, {"$set": {"team_id": tid}})
+                await s._log_activity(pid, current["id"], "project_moved", {
+                    "from_team_id": p.get("team_id"), "to_team_id": tid,
+                    "unassigned_images": plan["unassigned_images"], "removed_assignments": plan["removed_assignments"],
+                })
+                plan["status"] = "moved"
+            results.append(plan)
+        totals = {k: sum(r.get(k, 0) for r in results) for k in ("unassigned_images", "removed_assignments")}
+        return {"results": results, "totals": totals, "dry_run": payload.dry_run}
+
     @router.post("/teams/{tid}/invite")
     async def invite_member(tid: str, payload: s.InviteCreate, current=Depends(get_current_user)):
         await s._require_team_role(tid, current["id"], ["owner", "admin"])

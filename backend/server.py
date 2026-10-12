@@ -316,6 +316,10 @@ class TeamCreate(BaseModel):
 class TeamUpdate(BaseModel):
     name: str
 
+class TeamAddProjects(BaseModel):
+    project_ids: List[str]
+    dry_run: bool = False  # only report what would happen
+
 class InviteCreate(BaseModel):
     email: EmailStr
     role: str = "member"  # admin | member

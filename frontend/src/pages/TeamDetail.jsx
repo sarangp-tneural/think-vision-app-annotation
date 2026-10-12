@@ -3,6 +3,8 @@ import { useParams, useNavigate, Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import Navbar from "@/components/Navbar";
 import ProjectNameFields from "@/components/ProjectNameFields";
+import ExistingProjectsPicker from "@/components/ExistingProjectsPicker";
+import { addExistingProjects } from "@/lib/teamProjects";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -40,6 +42,8 @@ export default function TeamDetail() {
   const [projectName, setProjectName] = useState("");
   const [taskType, setTaskType] = useState("object_detection");
   const [creatingProject, setCreatingProject] = useState(false);
+  const [projectMode, setProjectMode] = useState("new");
+  const [existingIds, setExistingIds] = useState([]);
 
   const load = async () => {
     try {
@@ -112,13 +116,22 @@ export default function TeamDetail() {
   };
 
   const createProject = async () => {
-    if (!projectName.trim()) return toast.error("Name required");
+    const existing = projectMode === "existing";
+    if (existing && !existingIds.length) return toast.error("Select at least one project");
+    if (!existing && !projectName.trim()) return toast.error("Name required");
     setCreatingProject(true);
     try {
-      await api.post("/projects", { name: projectName, task_type: taskType, team_id: tid });
-      toast.success("Project created");
+      if (existing) {
+        const done = await addExistingProjects(tid, existingIds);
+        if (!done) return; // cancelled in the confirmation
+        if (!done.moved) return toast.error("No project could be added: " + (done.results.map((r) => r.reason).filter(Boolean).join("; ") || "nothing to move"));
+        toast.success(`${done.moved} project(s) added`);
+      } else {
+        await api.post("/projects", { name: projectName, task_type: taskType, team_id: tid });
+        toast.success("Project created");
+      }
       setProjectOpen(false);
-      setProjectName(""); setTaskType("object_detection");
+      setProjectName(""); setTaskType("object_detection"); setProjectMode("new"); setExistingIds([]);
       load();
     } catch (e) {
       toast.error(e.response?.data?.detail || "Create failed");
@@ -255,10 +268,23 @@ export default function TeamDetail() {
                     <DialogTitle className="font-heading tracking-tight">New project in {team.name}</DialogTitle>
                   </DialogHeader>
                   <div className="py-2">
-                    <ProjectNameFields
-                      name={projectName} onName={setProjectName}
-                      taskType={taskType} onTaskType={setTaskType} testIdPrefix="team-detail"
-                    />
+                    <div className="flex items-center gap-6 mb-3 text-xs">
+  {[["new", "New project"], ["existing", "Existing projects"]].map(([v, label]) => (
+    <label key={v} className="flex items-center gap-2 cursor-pointer">
+      <input type="radio" name="detail_project_mode" className="accent-primary" checked={projectMode === v} onChange={() => setProjectMode(v)}
+             data-testid={`team-detail-project-mode-${v}`} />
+      {label}
+    </label>
+  ))}
+</div>
+                    {projectMode === "new" ? (
+                      <ProjectNameFields
+                        name={projectName} onName={setProjectName}
+                        taskType={taskType} onTaskType={setTaskType} testIdPrefix="team-detail"
+                      />
+                    ) : (
+                      <ExistingProjectsPicker selected={existingIds} onChange={setExistingIds} teamId={tid} testIdPrefix="team-detail" />
+                    )}
                   </div>
                   <DialogFooter>
                     <Button
@@ -267,7 +293,7 @@ export default function TeamDetail() {
                       className="rounded-sm bg-primary text-black hover:bg-cyan-400 text-xs uppercase tracking-[0.2em] font-bold"
                       data-testid="team-project-submit-btn"
                     >
-                      {creatingProject ? "Creating..." : "Create Project"}
+                      {creatingProject ? "Working..." : projectMode === "existing" ? "Add Projects" : "Create Project"}
                     </Button>
                   </DialogFooter>
                 </DialogContent>

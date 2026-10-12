@@ -75,6 +75,7 @@ def register(s):
                 "classes_locked": bool(p.get("classes_locked", False)),
                 "image_count": image_count, "annotated_count": annotated_count,
                 "team_id": tid, "team_name": team_name_map.get(tid, ""),
+                "my_role": role_by_team.get(tid) if tid else "owner",
                 "created_at": p["created_at"],
             })
         result.sort(key=lambda x: x["created_at"], reverse=True)

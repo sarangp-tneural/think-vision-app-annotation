@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import Navbar from "@/components/Navbar";
 import ProjectNameFields from "@/components/ProjectNameFields";
+import ExistingProjectsPicker from "@/components/ExistingProjectsPicker";
+import { addExistingProjects } from "@/lib/teamProjects";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -20,6 +22,8 @@ export default function Teams() {
   const [name, setName] = useState("");
   const [projectName, setProjectName] = useState("");
   const [taskType, setTaskType] = useState("object_detection");
+  const [projectMode, setProjectMode] = useState("new");
+  const [existingIds, setExistingIds] = useState([]);
   const [creating, setCreating] = useState(false);
 
   const load = async () => {
@@ -37,7 +41,14 @@ export default function Teams() {
     setCreating(true);
     try {
       const { data } = await api.post("/teams", { name });
-      if (projectName.trim()) {
+      if (projectMode === "existing" && existingIds.length) {
+        try {
+          const done = await addExistingProjects(data.id, existingIds);
+          if (done && !done.moved) toast.error("No project could be added: " + (done.results.map((r) => r.reason).filter(Boolean).join("; ") || "nothing to move"));
+        } catch (e) {
+          toast.error(e.response?.data?.detail || "Team created, but the projects could not be added");
+        }
+      } else if (projectMode === "new" && projectName.trim()) {
         try {
           await api.post("/projects", { name: projectName, task_type: taskType, team_id: data.id });
         } catch (e) {
@@ -46,7 +57,7 @@ export default function Teams() {
       }
       toast.success("Team created");
       setOpen(false);
-      setName(""); setProjectName(""); setTaskType("object_detection");
+      setName(""); setProjectName(""); setTaskType("object_detection"); setProjectMode("new"); setExistingIds([]);
       navigate(`/teams/${data.id}`);
     } catch (e) {
       toast.error(e.response?.data?.detail || "Create failed");
@@ -95,14 +106,27 @@ export default function Teams() {
                 </div>
                 <div className="border-t border-[#27272A] pt-4">
                   <div className="text-[10px] uppercase tracking-[0.2em] text-primary mb-3">
-                    First project (optional)
+                    Projects (optional)
                   </div>
-                  <ProjectNameFields
-                    name={projectName} onName={setProjectName}
-                    taskType={taskType} onTaskType={setTaskType} testIdPrefix="team-create"
-                  />
+<div className="flex items-center gap-6 mb-3 text-xs">
+  {[["new", "New project"], ["existing", "Existing projects"]].map(([v, label]) => (
+    <label key={v} className="flex items-center gap-2 cursor-pointer">
+      <input type="radio" name="create_project_mode" className="accent-primary" checked={projectMode === v} onChange={() => setProjectMode(v)}
+             data-testid={`team-create-project-mode-${v}`} />
+      {label}
+    </label>
+  ))}
+</div>
+                  {projectMode === "new" ? (
+                    <ProjectNameFields
+                      name={projectName} onName={setProjectName}
+                      taskType={taskType} onTaskType={setTaskType} testIdPrefix="team-create"
+                    />
+                  ) : (
+                    <ExistingProjectsPicker selected={existingIds} onChange={setExistingIds} testIdPrefix="team-create" />
+                  )}
                   <div className="text-xs text-muted-foreground mt-3">
-                    Images in a team project can be assigned to the team's members. You can add more projects inside the team.
+                    Images in a team project can be assigned to the team's members. Existing projects are moved into the team. You can add more projects later.
                   </div>
                 </div>
               </div>
