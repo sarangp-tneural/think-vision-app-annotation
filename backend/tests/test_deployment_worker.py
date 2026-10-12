@@ -174,6 +174,7 @@ def test_training_remote_streams_progress_and_completes():
 
         with patch("deployment_worker.ssh_helper.connect") as mock_connect, \
              patch("deployment_worker.ssh_helper.upload_file") as mock_upload_file, \
+             patch("deployment_worker.ssh_helper.exec_command", return_value=(0, "", "")) as mock_cp, \
              patch("deployment_worker.ssh_helper.exec_command_streaming", side_effect=fake_exec_streaming) as mock_exec:
             mock_connect.return_value.__enter__.return_value = mock_client
             mock_connect.return_value.__exit__.return_value = False
@@ -185,6 +186,8 @@ def test_training_remote_streams_progress_and_completes():
             assert mock_upload_file.call_args.args[2] == f"/srv/work/runs/run_{rid[:8]}/train_eval.py"
             mock_exec.assert_called_once()
             assert mock_exec.call_args.args[1] == f"python3 -u /srv/work/runs/run_{rid[:8]}/train_eval.py"
+            # the finished weights are copied into {workdir}/models
+            assert f"/srv/work/models/run_{rid[:8]}_best.pt" in mock_cp.call_args.args[1]
 
         # Each epoch line triggered its own, distinct Mongo write - not just
         # a single write at the very end.
@@ -537,40 +540,52 @@ def test_two_deploys_plus_rollback_rotate_backups_correctly():
             mock_connect.return_value.__enter__.return_value = MagicMock()
             mock_connect.return_value.__exit__.return_value = False
 
+            def deploy(label):
+                rid, mid, weights = _seed_deployable_run(db, pid)
+                object_store[weights] = label
+                deployment_worker._pipeline_deploying_sync(
+                    rid, pid, 0, {**_DEPLOY_REQ_BASE, "remote_production_model_path": prod}, fake_get_object,
+                )
+                run = db.pipeline_runs.find_one({"id": rid})
+                assert run["status"] == "completed"
+                return run, mid
+
             # --- Deploy A: nothing backed up yet ---
-            rid_a, mid_a, weights_a = _seed_deployable_run(db, pid)
-            object_store[weights_a] = b"MODEL_A"
-            deployment_worker._pipeline_deploying_sync(
-                rid_a, pid, 0, {**_DEPLOY_REQ_BASE, "remote_production_model_path": prod}, fake_get_object,
-            )
+            run_a, mid_a = deploy(b"MODEL_A")
             assert fs[prod] == b"MODEL_A"
             assert fs[f"{prod}.bak1"] == b"ORIGINAL_LIVE_MODEL"
             assert f"{prod}.bak2" not in fs
-            run_a = db.pipeline_runs.find_one({"id": rid_a})
-            assert run_a["status"] == "completed"
             assert run_a["deploy"]["current_became_bak1"] is True
             assert run_a["deploy"]["bak1_became_bak2"] is False
             assert run_a["deploy"]["oldest_backup_dropped"] is False
-            assert db.models.find_one({"id": mid_a})["is_active"] is True
+            # Deploying only uploads; activation is manual (Model Training)
+            assert db.models.find_one({"id": mid_a})["is_active"] is False
 
-            # --- Deploy B: full three-way rotation ---
-            rid_b, mid_b, weights_b = _seed_deployable_run(db, pid)
-            object_store[weights_b] = b"MODEL_B"
-            deployment_worker._pipeline_deploying_sync(
-                rid_b, pid, 0, {**_DEPLOY_REQ_BASE, "remote_production_model_path": prod}, fake_get_object,
-            )
+            # --- Deploy B: backups shift down ---
+            run_b, _mid_b = deploy(b"MODEL_B")
             assert fs[prod] == b"MODEL_B"
             assert fs[f"{prod}.bak1"] == b"MODEL_A"
             assert fs[f"{prod}.bak2"] == b"ORIGINAL_LIVE_MODEL"
-            run_b = db.pipeline_runs.find_one({"id": rid_b})
             assert run_b["deploy"]["current_became_bak1"] is True
             assert run_b["deploy"]["bak1_became_bak2"] is True
             assert run_b["deploy"]["oldest_backup_dropped"] is False
-            # B's activation deactivates A
-            assert db.models.find_one({"id": mid_a})["is_active"] is False
-            assert db.models.find_one({"id": mid_b})["is_active"] is True
 
-            # --- Rollback: single swap, no .bak2 cascade ---
+            # --- Deploys C, D: fills .bak3 and .bak4 ---
+            deploy(b"MODEL_C")
+            run_d, _ = deploy(b"MODEL_D")
+            assert [fs[f"{prod}.bak{i}"] for i in (1, 2, 3, 4)] == [
+                b"MODEL_C", b"MODEL_B", b"MODEL_A", b"ORIGINAL_LIVE_MODEL"]
+            assert run_d["deploy"]["oldest_backup_dropped"] is False
+
+            # --- Deploy E: the oldest (the original) falls off the end ---
+            run_e, _ = deploy(b"MODEL_E")
+            assert fs[prod] == b"MODEL_E"
+            assert [fs[f"{prod}.bak{i}"] for i in (1, 2, 3, 4)] == [
+                b"MODEL_D", b"MODEL_C", b"MODEL_B", b"MODEL_A"]
+            assert f"{prod}.bak5" not in fs
+            assert run_e["deploy"]["oldest_backup_dropped"] is True
+
+            # --- Rollback: single swap with .bak1, no cascade ---
             rid_r = str(uuid.uuid4())
             db.pipeline_runs.insert_one({
                 "id": rid_r, "project_id": pid, "pipeline_id": str(uuid.uuid4()),
@@ -581,14 +596,12 @@ def test_two_deploys_plus_rollback_rotate_backups_correctly():
             deployment_worker._pipeline_rollback_sync(
                 rid_r, pid, 0, {**_DEPLOY_REQ_BASE, "remote_production_model_path": prod},
             )
-            assert fs[prod] == b"MODEL_A"  # restored to what B overwrote
-            assert fs[f"{prod}.bak1"] == b"MODEL_B"  # what was overwritten is now backed up
-            assert fs[f"{prod}.bak2"] == b"ORIGINAL_LIVE_MODEL"  # untouched - no cascade
+            assert fs[prod] == b"MODEL_D"  # restored to what E overwrote
+            assert fs[f"{prod}.bak1"] == b"MODEL_E"  # what was overwritten is now backed up
+            assert [fs[f"{prod}.bak{i}"] for i in (2, 3, 4)] == [b"MODEL_C", b"MODEL_B", b"MODEL_A"]  # untouched
             run_r = db.pipeline_runs.find_one({"id": rid_r})
             assert run_r["status"] == "completed"
             assert run_r["deploy"] == {"rolled_back": True, "deployed_at": run_r["deploy"]["deployed_at"]}
-            # Rollback does not touch local activation state (ROADMAP.md SS3)
-            assert db.models.find_one({"id": mid_b})["is_active"] is True
     finally:
         for p in patchers:
             p.stop()
@@ -618,7 +631,7 @@ def test_deploying_without_candidate_model_fails():
             mock_connect.assert_not_called()
         run = db.pipeline_runs.find_one({"id": rid})
         assert run["status"] == "failed"
-        assert "downloading_model" in run["error"]
+        assert "no model to upload" in run["error"]
     finally:
         db.projects.delete_one({"id": pid})
         db.pipeline_runs.delete_one({"id": rid})
