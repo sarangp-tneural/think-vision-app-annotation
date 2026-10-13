@@ -15,7 +15,7 @@ import { CLASSES } from "@/constants/testIds";
 import {
   Save, Sparkles, Trash2, ArrowLeft, ArrowRight, Undo2, Copy,
   Square, Hexagon, Slash, Dot, Circle as CircleIcon, Keyboard,
-  ZoomIn, ZoomOut, Maximize2, Send, CheckCircle2, XCircle, UserPlus,
+  ZoomIn, ZoomOut, Maximize2, Crosshair, Send, CheckCircle2, XCircle, UserPlus,
   MessageSquare, Reply, Check, Pencil, RotateCw, ChevronDown, MousePointer2,
 } from "lucide-react";
 import {
@@ -57,6 +57,13 @@ export default function Annotator() {
   const [drawing, setDrawing] = useState(null);
   const [polyPoints, setPolyPoints] = useState([]);
   const [cursor, setCursor] = useState(null);
+  const [guides, setGuides] = useState(() => {
+    try { return localStorage.getItem("tv_crosshair") !== "0"; } catch { return true; }
+  });
+  const toggleGuides = () => setGuides((g) => {
+    try { localStorage.setItem("tv_crosshair", g ? "0" : "1"); } catch { /* storage unavailable */ }
+    return !g;
+  });
   const [selectedIdx, setSelectedIdx] = useState(null);
   const [editing, setEditing] = useState(null); // { mode: 'move'|'resize-nw'|..., idx, orig, startX, startY }
   const [saving, setSaving] = useState(false);
@@ -463,6 +470,7 @@ export default function Annotator() {
       if (e.key === "ArrowRight") navRef.current.goNext(); else navRef.current.goPrev();
       return;
     }
+    if (!meta && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "g") { toggleGuides(); return; }
     if (e.key === "Alt") {
       e.preventDefault(); // keep the browser/OS from focusing its menu bar
       if (!drawing && !polyPoints.length) setAltDown(true);
@@ -808,6 +816,14 @@ export default function Annotator() {
                 <ZoomIn className="w-4 h-4" />
               </button>
             </div>
+            <button
+              onClick={toggleGuides}
+              className={`h-8 w-8 flex items-center justify-center border rounded-sm ${guides ? "border-primary text-primary" : "border-[#27272A] text-muted-foreground hover:text-primary"}`}
+              title="Crosshair guides (G)"
+              data-testid="crosshair-toggle-btn"
+            >
+              <Crosshair className="w-4 h-4" />
+            </button>
             <Button variant="ghost" size="sm" onClick={undo} disabled={boxes.length === 0 || readOnly} className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="undo-btn" title="Undo (⌘Z)">
               <Undo2 className="w-4 h-4 mr-1" /> Undo
             </Button>
@@ -939,6 +955,7 @@ export default function Annotator() {
               <div className="flex items-center justify-between"><span>Save</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘S</kbd></div>
               <div className="flex items-center justify-between"><span>Save/Approve → next</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘↵</kbd></div>
               <div className="flex items-center justify-between"><span>Reject → next</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘⇧↵</kbd></div>
+              <div className="flex items-center justify-between"><span>Crosshair guides</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">G</kbd></div>
               <div className="flex items-center justify-between"><span>Prev / next image</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">← →</kbd></div>
               <div className="flex items-center justify-between"><span>Save &amp; Submit → Next</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⇧→</kbd></div>
               <div className="flex items-center justify-between"><span>Next needing work</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">]</kbd></div>
@@ -995,6 +1012,13 @@ export default function Annotator() {
               viewBox="0 0 100 100"
               preserveAspectRatio="none"
             >
+              {/* crosshair guides following the pointer (draw tools only) */}
+              {guides && cursor && !selectMode && !spaceDown && !readOnly && (
+                <g stroke="#FFFFFF" strokeWidth="2" strokeOpacity="0.9" strokeDasharray="6 4" data-testid="crosshair-guides">
+                  <line x1={cursor.x * 100} y1="0" x2={cursor.x * 100} y2="100" vectorEffect="non-scaling-stroke" />
+                  <line x1="0" y1={cursor.y * 100} x2="100" y2={cursor.y * 100} vectorEffect="non-scaling-stroke" />
+                </g>
+              )}
               {boxes.map((b, i) => {
                 const color = labelColor(b.label);
                 if (b.type === "polygon" || b.type === "polyline") {
