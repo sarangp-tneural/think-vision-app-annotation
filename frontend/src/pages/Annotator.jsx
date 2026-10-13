@@ -43,6 +43,7 @@ export default function Annotator() {
   const fastRef = useRef({});
   const repeatRef = useRef(() => {});
   const navRef = useRef({ goPrev: () => {}, goNext: () => {} });
+  const repeatedForRef = useRef(null); // image id that already received Repeat Previous
   const lastBoxesRef = useRef(null); // { imgId, boxes } of the image just navigated away from
   const [image, setImage] = useState(null);
   const [images, setImages] = useState([]);
@@ -451,7 +452,7 @@ export default function Annotator() {
     if (meta && e.key.toLowerCase() === "s") { e.preventDefault(); save(); return; }
     if (meta && e.key.toLowerCase() === "z") { e.preventDefault(); undo(); return; }
     if (meta && e.key === "Enter") { e.preventDefault(); e.shiftKey ? fastRef.current.openReject() : fastRef.current.fastRun(); return; }
-    if (e.shiftKey && !meta && e.key.toLowerCase() === "r") { e.preventDefault(); repeatRef.current(); return; }
+    if (!e.shiftKey && !e.altKey && !meta && e.key.toLowerCase() === "r") { e.preventDefault(); repeatRef.current(); return; }
     if (e.key === "]") { fastRef.current.jumpToQueueNext(); return; }
     if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
       // Leave arrows alone inside open menus/lists and mid-gesture.
@@ -725,16 +726,19 @@ export default function Annotator() {
   // Copy the previous image's boxes onto this one at the same positions.
   const repeatPrevious = async () => {
     if (readOnly || !prev || image?.id !== imgId) return;
+    // Once per image: a second press (or a double-click) would stack duplicate copies.
+    if (repeatedForRef.current === imgId) { toast.info("Already copied from the previous image"); return; }
+    repeatedForRef.current = imgId;
     try {
       let src;
       if (lastBoxesRef.current?.imgId === prev.id) src = lastBoxesRef.current.boxes;
       else src = (await api.get(`/images/${prev.id}`)).data.annotations || [];
-      if (!src.length) { toast.info("Previous image has no annotations"); return; }
+      if (!src.length) { repeatedForRef.current = null; toast.info("Previous image has no annotations"); return; }
       // Fresh uids so the copies don't share React keys with the source image.
       const copies = src.map((b) => ({ type: "bbox", ...b, uid: undefined }));
       commitBoxes([...boxes, ...copies]);
       toast.success(`Copied ${copies.length} annotation${copies.length === 1 ? "" : "s"} from previous image`);
-    } catch { toast.error("Couldn't load the previous image's annotations"); }
+    } catch { repeatedForRef.current = null; toast.error("Couldn't load the previous image's annotations"); }
   };
   repeatRef.current = repeatPrevious;
   navRef.current = { goPrev: () => goToImage(prev?.id), goNext: () => goToImage(next?.id) };
@@ -807,7 +811,7 @@ export default function Annotator() {
             <Button variant="ghost" size="sm" onClick={undo} disabled={boxes.length === 0 || readOnly} className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="undo-btn" title="Undo (⌘Z)">
               <Undo2 className="w-4 h-4 mr-1" /> Undo
             </Button>
-            <Button variant="ghost" size="sm" onClick={repeatPrevious} disabled={!prev || readOnly} className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="repeat-previous-btn" title="Repeat Previous (⇧R)">
+            <Button variant="ghost" size="sm" onClick={repeatPrevious} disabled={!prev || readOnly} className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="repeat-previous-btn" title="Repeat Previous (R)">
               <Copy className="w-4 h-4 mr-1" /> Repeat Previous
             </Button>
             <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.15em] text-muted-foreground" data-testid="autolabel-provider">
@@ -939,7 +943,7 @@ export default function Annotator() {
               <div className="flex items-center justify-between"><span>Save &amp; Submit → Next</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⇧→</kbd></div>
               <div className="flex items-center justify-between"><span>Next needing work</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">]</kbd></div>
               <div className="flex items-center justify-between"><span>Undo</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘Z</kbd></div>
-              <div className="flex items-center justify-between"><span>Repeat previous</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⇧R</kbd></div>
+              <div className="flex items-center justify-between"><span>Repeat previous</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">R</kbd></div>
               <div className="flex items-center justify-between"><span>Rotate box 1° (⇧ 15°)</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">, .</kbd></div>
               <div className="flex items-center justify-between"><span>Finish polygon</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">↵</kbd></div>
               <div className="flex items-center justify-between"><span>Cancel</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">Esc</kbd></div>
