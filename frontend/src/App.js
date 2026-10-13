@@ -8,6 +8,7 @@ import ProjectDetail from "@/pages/ProjectDetail";
 import Annotator from "@/pages/Annotator";
 import Versions from "@/pages/Versions";
 import ModelDeploy from "@/pages/ModelDeploy";
+import DeployPipelinePage from "@/pages/DeployPipelinePage";
 import Teams from "@/pages/Teams";
 import TeamDetail from "@/pages/TeamDetail";
 import TeamDashboard from "@/pages/TeamDashboard";
@@ -59,6 +60,7 @@ function App() {
           <Route path="/projects/:pid/annotate/:imgId" element={<Protected><Annotator /></Protected>} />
           <Route path="/projects/:pid/versions" element={<Protected><Versions /></Protected>} />
           <Route path="/projects/:pid/deploy" element={<Protected><ModelDeploy /></Protected>} />
+          <Route path="/projects/:pid/deploy-pipeline" element={<Protected><DeployPipelinePage /></Protected>} />
         </Routes>
       </BrowserRouter>
       <Toaster theme="dark" position="top-right" />

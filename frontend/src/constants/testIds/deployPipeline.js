@@ -1,5 +1,5 @@
 // Test IDs for the deploy pipeline feature (SSH-driven remote training,
-// testing and deployment wizard, rendered as a tab inside ModelDeploy).
+// testing and deployment wizard, rendered on its own page, DeployPipelinePage).
 // See ./index.js for the recipe to add a new feature file.
 
 export const DEPLOY_PIPELINE = {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { Link, Navigate, useParams, useSearchParams } from "react-router-dom";
 import { api, getUser } from "@/lib/api";
 import Navbar from "@/components/Navbar";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,6 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import DeployPipeline from "@/pages/DeployPipeline";
 import RemoteTrainFields from "@/components/RemoteTrainFields";
 import { validateRemoteForm, remoteTrainBody } from "@/lib/remoteTrainForm";
 import { REMOTE_TRAIN } from "@/constants/testIds";
@@ -51,7 +50,7 @@ export default function ModelDeploy() {
   const canTrain = myRole !== "reviewer";
   const canActivate = (m) => canManage || (canTrain && m.user_id === me?.id && !m.source);
   // The role arrives after first render, so a ?tab= link is resolved here rather than frozen at mount.
-  const wantedTab = ["real", "simulated", "pipeline"].includes(params.get("tab")) ? params.get("tab") : "real";
+  const wantedTab = ["real", "simulated"].includes(params.get("tab")) ? params.get("tab") : "real";
   const [pickedTab, setPickedTab] = useState(null);
   const activeTab = pickedTab ?? (canManage || wantedTab === "real" ? wantedTab : "real");
   const [editModelName, setEditModelName] = useState("");
@@ -223,6 +222,7 @@ export default function ModelDeploy() {
     toast.success("Endpoint copied");
   };
 
+  if (params.get("tab") === "pipeline") return <Navigate replace to={`/projects/${pid}/deploy-pipeline`} />;
   if (!project) return <div className="min-h-screen bg-background"><Navbar /></div>;
 
   return (
@@ -234,12 +234,21 @@ export default function ModelDeploy() {
       ]} />
 
       <main className="max-w-[1600px] mx-auto px-6 py-12">
-        <div className="mb-10">
+        <div className="mb-10 flex flex-wrap items-start justify-between gap-4">
+          <div>
           <div className="text-[10px] uppercase tracking-[0.3em] text-primary mb-3">// Model deployment</div>
           <h1 className="font-heading text-4xl font-bold tracking-tight mb-2">Train & Deploy</h1>
           <p className="text-sm text-muted-foreground">
             Train real YOLOv8n models on your approved annotations. Once activated, the model auto-labels new images — replacing Gemini calls.
           </p>
+          </div>
+          {canManage && (
+            <Link to={`/projects/${pid}/deploy-pipeline`} data-testid="tab-pipeline">
+              <Button variant="outline" className="rounded-sm border-[#27272A] bg-transparent hover:bg-[#1C1C1C] hover:border-primary hover:text-primary text-xs uppercase tracking-[0.2em]">
+                <Server className="w-3 h-3 mr-2" /> Deploy Pipeline →
+              </Button>
+            </Link>
+          )}
         </div>
 
         <div className="panel p-5 mb-8 flex flex-wrap items-center justify-between gap-4" data-testid="autolabel-provider-row">
@@ -276,9 +285,6 @@ export default function ModelDeploy() {
             </TabsTrigger>
             {canManage && <TabsTrigger value="simulated" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-simulated">
               Simulated
-            </TabsTrigger>}
-            {canManage && <TabsTrigger value="pipeline" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-pipeline">
-              <Server className="w-3 h-3 mr-2" /> Deploy Pipeline
             </TabsTrigger>}
           </TabsList>
 
@@ -422,7 +428,7 @@ export default function ModelDeploy() {
                 <div className="border border-dashed border-[#27272A] p-16 text-center">
                   <Zap className="w-10 h-10 text-muted-foreground mx-auto mb-6" strokeWidth={1.5} />
                   <h3 className="font-heading text-xl mb-2">No trained models yet</h3>
-                  <p className="text-sm text-muted-foreground">Train your first YOLOv8n on approved annotations, or train on a server from the Deploy Pipeline tab.</p>
+                  <p className="text-sm text-muted-foreground">Train your first YOLOv8n on approved annotations, or train on a server from the Deploy Pipeline page.</p>
                 </div>
               ) : (
                 <div className="border-t border-[#27272A]">
@@ -713,11 +719,6 @@ export default function ModelDeploy() {
             <p className="text-sm text-muted-foreground">Configure a run above to train your first model.</p>
           </div>
         )}
-          </TabsContent>
-
-          {/* DEPLOY PIPELINE TAB (M9) */}
-          <TabsContent value="pipeline">
-            <DeployPipeline pid={pid} project={project} />
           </TabsContent>
         </Tabs>
       </main>

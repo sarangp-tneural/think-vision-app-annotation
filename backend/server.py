@@ -492,10 +492,10 @@ async def _project_out(pid: str):
         "team_name": team_name,
         "settings": {
             "confidence_threshold": settings.get("confidence_threshold", 0.4),
-            "fallback_to_gemini": settings.get("fallback_to_gemini", True),
+            "fallback_to_gemini": settings.get("fallback_to_gemini", False),
             "min_boxes_threshold": settings.get("min_boxes_threshold", 1),
             "show_confidence": settings.get("show_confidence", True),
-            "gemini_restrict_to_classes": settings.get("gemini_restrict_to_classes", False),
+            "gemini_restrict_to_classes": settings.get("gemini_restrict_to_classes", True),
             "gemini_allowed_classes": settings.get("gemini_allowed_classes"),
         },
         "active_model": active_model,
@@ -968,8 +968,8 @@ async def batch_auto_label(
         "skipped": 0,
         "settings_snapshot": {
             "model": (active or {}).get("model_arch") or (active or {}).get("name"),
-            "fallback_to_gemini": st.get("fallback_to_gemini", True),
-            "restrict_to_classes": st.get("gemini_restrict_to_classes", False),
+            "fallback_to_gemini": st.get("fallback_to_gemini", False),
+            "restrict_to_classes": st.get("gemini_restrict_to_classes", True),
             "confidence_threshold": st.get("confidence_threshold"),
         },
         "status": "queued",
@@ -1978,7 +1978,7 @@ async def _auto_label_router_unfiltered(project_id: str, image_bytes: bytes, pro
     classes = project.get("classes", []) if project else []
     settings = project.get("settings", {}) if project else {}
     conf = settings.get("confidence_threshold", CONFIDENCE_THRESHOLD)
-    fallback_enabled = settings.get("fallback_to_gemini", True)
+    fallback_enabled = settings.get("fallback_to_gemini", False)
     min_boxes = settings.get("min_boxes_threshold", 1)
 
     active = await db.models.find_one({"project_id": project_id, "is_active": True, "status": "trained"})
@@ -2007,7 +2007,7 @@ async def _auto_label_router_unfiltered(project_id: str, image_bytes: bytes, pro
     # Gemini
     try:
         b64 = base64.b64encode(image_bytes).decode()
-        restrict_to_classes = settings.get("gemini_restrict_to_classes", False)
+        restrict_to_classes = settings.get("gemini_restrict_to_classes", True)
         # None = user hasn't manually curated a subset -> restrict to the
         # full project class list (old behavior); a list (even empty) means
         # they picked specific classes via the Settings UI checkboxes.

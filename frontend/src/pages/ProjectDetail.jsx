@@ -65,7 +65,7 @@ export default function ProjectDetail() {
   const [batchOpen, setBatchOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [dupesOpen, setDupesOpen] = useState(false);
-  const [settings, setSettings] = useState({ confidence_threshold: 0.4, fallback_to_gemini: true, min_boxes_threshold: 1, show_confidence: true, gemini_restrict_to_classes: false, gemini_allowed_classes: null });
+  const [settings, setSettings] = useState({ confidence_threshold: 0.4, fallback_to_gemini: false, min_boxes_threshold: 1, show_confidence: true, gemini_restrict_to_classes: true, gemini_allowed_classes: null });
   const [alQueue, setAlQueue] = useState(null);
   const [alLoading, setAlLoading] = useState(false);
   const fileInputRef = useRef(null);
@@ -455,6 +455,16 @@ export default function ProjectDetail() {
                 </DialogContent>
               </Dialog>
             )}
+            {myRole !== "reviewer" && (
+              <Button
+                variant="outline"
+                onClick={() => navigate(`/projects/${pid}/deploy`)}
+                className="rounded-sm border-[#27272A] bg-transparent hover:bg-[#1C1C1C] hover:border-primary hover:text-primary text-xs uppercase tracking-[0.2em]"
+                data-testid="train-btn"
+              >
+                <Rocket className="w-4 h-4 mr-2" /> Train
+              </Button>
+            )}
             {canManage && (<>
             <Button
               variant="outline"
@@ -482,11 +492,11 @@ export default function ProjectDetail() {
             </Button>
             <Button
               variant="outline"
-              onClick={() => navigate(`/projects/${pid}/deploy?tab=pipeline`)}
+              onClick={() => navigate(`/projects/${pid}/deploy-pipeline`)}
               className="rounded-sm border-[#27272A] bg-transparent hover:bg-[#1C1C1C] hover:border-primary hover:text-primary text-xs uppercase tracking-[0.2em]"
               data-testid="deploy-btn"
             >
-              <Rocket className="w-4 h-4 mr-2" /> Deploy
+              <Rocket className="w-4 h-4 mr-2" /> Deploy Pipeline
             </Button>
             </>)}
             {canManage && (
