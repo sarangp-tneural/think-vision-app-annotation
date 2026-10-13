@@ -261,6 +261,26 @@ def register(s):
         background.add_task(_after_review, img, project, payload, current["id"])
         return {"ok": True}
 
+    @router.post("/images/{img_id}/withdraw")
+    async def withdraw_image(img_id: str, current=Depends(get_current_user)):
+        """submitted -> assigned, so the annotator can fix a mistake without waiting for a reviewer to reject it.
+        They edit and submit again as usual. Approved images stay locked (see /reopen)."""
+        img = await db.images.find_one({"id": img_id})
+        if not img:
+            raise HTTPException(status_code=404, detail="Not found")
+        _, role = await s._project_access(img["project_id"], current["id"])
+        if role == "reviewer":
+            raise HTTPException(status_code=403, detail="Reviewers can't withdraw a submission")
+        if img.get("assigned_to") != current["id"] and role not in ("owner", "admin"):
+            raise HTTPException(status_code=403, detail="Only the person this image is assigned to can withdraw it")
+        # Match on the status so this can't race a reviewer's approve/reject.
+        res = await db.images.update_one({"id": img_id, "review_status": "submitted"},
+                                         {"$set": {"review_status": "assigned", "submitted_at": None}})
+        if not res.matched_count:
+            raise HTTPException(status_code=409, detail="Image is no longer waiting for review")
+        await s._log_activity(img["project_id"], current["id"], "image_withdrawn", {"image_id": img_id})
+        return {"ok": True, "review_status": "assigned"}
+
     @router.post("/images/{img_id}/reopen")
     async def reopen_image(img_id: str, payload: ReopenIn, current=Depends(get_current_user)):
         """approved -> rejected, so an approved (e.g. imported) image can be corrected. It then follows the normal

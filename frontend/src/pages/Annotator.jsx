@@ -86,7 +86,7 @@ export default function Annotator() {
   const assignee = image?.assigned_to || null;
   let lockReason = null;
   if (myRole === "reviewer") lockReason = "Reviewers review annotations but can't edit them.";
-  else if (status === "submitted") lockReason = "Waiting for review. Editing is locked.";
+  else if (status === "submitted") lockReason = "Waiting for review. Use Withdraw to edit to make changes.";
   else if (status === "approved") lockReason = "Approved. This image is locked.";
   else if (canManageRole) { if (assignee && assignee !== currentUser?.id) lockReason = "Assigned to another team member."; }
   else if (myRole && assignee !== currentUser?.id) lockReason = "This image isn't assigned to you.";
@@ -518,6 +518,17 @@ export default function Annotator() {
       setImage({ ...image, review_status: "submitted" });
     } catch (e) {
       toast.error(e.response?.data?.detail || "Submit failed");
+    }
+  };
+
+  const withdrawSubmission = async () => {
+    try {
+      await api.post(`/images/${imgId}/withdraw`);
+      toast.success("Pulled back. Edit it and submit again.");
+      setImage({ ...image, review_status: "assigned" });
+      patchListStatus(imgId, "assigned");
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Withdraw failed");
     }
   };
 
@@ -1249,6 +1260,17 @@ export default function Annotator() {
                   data-testid="submit-for-review-btn"
                 >
                   <Send className="w-3 h-3 mr-2" /> Submit for Review
+                </Button>
+              )}
+              {reviewStatus === "submitted" && myRole !== "reviewer" && (isAssignedToMe || canManageRole) && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={withdrawSubmission}
+                  className="w-full rounded-sm border-[#27272A] bg-transparent hover:border-primary hover:text-primary h-8 text-xs uppercase tracking-[0.2em]"
+                  data-testid="withdraw-btn"
+                >
+                  <Undo2 className="w-3 h-3 mr-2" /> Withdraw to edit
                 </Button>
               )}
               {canReview && reviewStatus === "submitted" && (
