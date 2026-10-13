@@ -42,6 +42,7 @@ export default function Annotator() {
   const autoSaveTimer = useRef(null);
   const fastRef = useRef({});
   const repeatRef = useRef(() => {});
+  const navRef = useRef({ goPrev: () => {}, goNext: () => {} });
   const lastBoxesRef = useRef(null); // { imgId, boxes } of the image just navigated away from
   const [image, setImage] = useState(null);
   const [images, setImages] = useState([]);
@@ -452,6 +453,15 @@ export default function Annotator() {
     if (meta && e.key === "Enter") { e.preventDefault(); e.shiftKey ? fastRef.current.openReject() : fastRef.current.fastRun(); return; }
     if (e.shiftKey && !meta && e.key.toLowerCase() === "r") { e.preventDefault(); repeatRef.current(); return; }
     if (e.key === "]") { fastRef.current.jumpToQueueNext(); return; }
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      // Leave arrows alone inside open menus/lists and mid-gesture.
+      if (meta || e.altKey || e.target?.closest?.('[role="menu"],[role="listbox"]')) return;
+      if (drawing || editing || polyPoints.length) return;
+      e.preventDefault();
+      if (e.shiftKey) { if (e.key === "ArrowRight") fastRef.current.fastRun(); return; }
+      if (e.key === "ArrowRight") navRef.current.goNext(); else navRef.current.goPrev();
+      return;
+    }
     if (e.key === "Alt") {
       e.preventDefault(); // keep the browser/OS from focusing its menu bar
       if (!drawing && !polyPoints.length) setAltDown(true);
@@ -475,7 +485,7 @@ export default function Annotator() {
     const t = TOOLS.find((tl) => tl.key.toLowerCase() === e.key.toLowerCase());
     if (t) { setActiveTool(t.id); cancelDrawing(); }
     // eslint-disable-next-line
-  }, [boxes, selectedIdx, polyPoints, activeTool, zoom, pan, drawing]);
+  }, [boxes, selectedIdx, polyPoints, activeTool, zoom, pan, drawing, editing]);
 
   const onKeyUp = useCallback((e) => {
     if (e.key === " ") setSpaceDown(false);
@@ -728,6 +738,7 @@ export default function Annotator() {
     } catch { toast.error("Couldn't load the previous image's annotations"); }
   };
   repeatRef.current = repeatPrevious;
+  navRef.current = { goPrev: () => goToImage(prev?.id), goNext: () => goToImage(next?.id) };
 
   if (!image || !project) {
     return (
@@ -750,13 +761,13 @@ export default function Annotator() {
       <div className="border-b border-[#27272A] bg-[#0a0a0a]">
         <div className="max-w-[1600px] mx-auto px-6 py-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={() => goToImage(prev?.id)} disabled={!prev} className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="prev-image-btn">
+            <Button variant="ghost" size="sm" onClick={() => goToImage(prev?.id)} disabled={!prev} title="Previous image (←)" className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="prev-image-btn">
               <ArrowLeft className="w-4 h-4 mr-1" /> Prev
             </Button>
             <span className="text-xs text-muted-foreground px-2" data-testid="image-counter">
               {currentIdx + 1} / {images.length}
             </span>
-            <Button variant="ghost" size="sm" onClick={() => goToImage(next?.id)} disabled={!next} className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="next-image-btn">
+            <Button variant="ghost" size="sm" onClick={() => goToImage(next?.id)} disabled={!next} title="Next image (→)" className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:text-primary" data-testid="next-image-btn">
               Next <ArrowRight className="w-4 h-4 ml-1" />
             </Button>
 
@@ -925,6 +936,8 @@ export default function Annotator() {
               <div className="flex items-center justify-between"><span>Save</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘S</kbd></div>
               <div className="flex items-center justify-between"><span>Save/Approve → next</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘↵</kbd></div>
               <div className="flex items-center justify-between"><span>Reject → next</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘⇧↵</kbd></div>
+              <div className="flex items-center justify-between"><span>Prev / next image</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">← →</kbd></div>
+              <div className="flex items-center justify-between"><span>Save &amp; Submit → Next</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⇧→</kbd></div>
               <div className="flex items-center justify-between"><span>Next needing work</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">]</kbd></div>
               <div className="flex items-center justify-between"><span>Undo</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘Z</kbd></div>
               <div className="flex items-center justify-between"><span>Repeat previous</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⇧R</kbd></div>
