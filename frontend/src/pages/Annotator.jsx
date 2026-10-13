@@ -16,7 +16,7 @@ import {
   Save, Sparkles, Trash2, ArrowLeft, ArrowRight, Undo2, Copy,
   Square, Hexagon, Slash, Dot, Circle as CircleIcon, Keyboard,
   ZoomIn, ZoomOut, Maximize2, Send, CheckCircle2, XCircle, UserPlus,
-  MessageSquare, Reply, Check, Pencil, RotateCw, ChevronDown,
+  MessageSquare, Reply, Check, Pencil, RotateCw, ChevronDown, MousePointer2,
 } from "lucide-react";
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
@@ -25,6 +25,7 @@ import {
 const COLORS = ["#06B6D4", "#D946EF", "#EAB308", "#22C55E", "#EF4444", "#F97316", "#3B82F6"];
 
 const TOOLS = [
+  { id: "select", label: "Select", icon: MousePointer2, key: "V" },
   { id: "bbox", label: "Box", icon: Square, key: "B" },
   { id: "polygon", label: "Polygon", icon: Hexagon, key: "P" },
   { id: "polyline", label: "Line", icon: Slash, key: "L" },
@@ -66,6 +67,9 @@ export default function Annotator() {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [panning, setPanning] = useState(null);
   const [spaceDown, setSpaceDown] = useState(false);
+  // Holding Alt edits boxes (move/resize/rotate) without leaving the current draw tool.
+  const [altDown, setAltDown] = useState(false);
+  const selectMode = activeTool === "select" || altDown;
   const [comments, setComments] = useState([]);
   const [newComment, setNewComment] = useState("");
   const [replyTo, setReplyTo] = useState(null);
@@ -204,6 +208,7 @@ export default function Annotator() {
 
     // Clicked empty canvas → deselect current bbox
     setSelectedIdx(null);
+    if (selectMode) return; // select mode never draws
     if (activeTool === "bbox" || activeTool === "ellipse") {
       setDrawing({ tool: activeTool, startX: p.x, startY: p.y, x: p.x, y: p.y, w: 0, h: 0 });
     } else if (activeTool === "point") {
@@ -312,7 +317,7 @@ export default function Annotator() {
   };
 
   const onCanvasClick = (e) => {
-    if (spaceDown) return;
+    if (spaceDown || selectMode) return;
     if (activeTool !== "polygon" && activeTool !== "polyline") return;
     if (e.detail === 2) return; // handled by dblclick
     const p = getPos(e);
@@ -447,7 +452,12 @@ export default function Annotator() {
     if (meta && e.key === "Enter") { e.preventDefault(); e.shiftKey ? fastRef.current.openReject() : fastRef.current.fastRun(); return; }
     if (e.shiftKey && !meta && e.key.toLowerCase() === "r") { e.preventDefault(); repeatRef.current(); return; }
     if (e.key === "]") { fastRef.current.jumpToQueueNext(); return; }
-    if (e.key === "Escape") { cancelDrawing(); return; }
+    if (e.key === "Alt") {
+      e.preventDefault(); // keep the browser/OS from focusing its menu bar
+      if (!drawing && !polyPoints.length) setAltDown(true);
+      return;
+    }
+    if (e.key === "Escape") { cancelDrawing(); setSelectedIdx(null); return; }
     if (e.key === "Enter") { finishPoly(); return; }
     if (e.key === " ") { e.preventDefault(); setSpaceDown(true); return; }
     if (e.key === "+" || e.key === "=") { zoomAt(1.2, window.innerWidth / 2, window.innerHeight / 2); return; }
@@ -465,16 +475,21 @@ export default function Annotator() {
     const t = TOOLS.find((tl) => tl.key.toLowerCase() === e.key.toLowerCase());
     if (t) { setActiveTool(t.id); cancelDrawing(); }
     // eslint-disable-next-line
-  }, [boxes, selectedIdx, polyPoints, activeTool, zoom, pan]);
+  }, [boxes, selectedIdx, polyPoints, activeTool, zoom, pan, drawing]);
 
   const onKeyUp = useCallback((e) => {
     if (e.key === " ") setSpaceDown(false);
+    if (e.key === "Alt") { setAltDown(false); setSelectedIdx(null); setEditing(null); }
   }, []);
 
   useEffect(() => {
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKeyUp);
+    // Alt-Tab away never delivers the keyup, so drop Alt mode on blur.
+    const onBlur = () => { setAltDown(false); setEditing(null); };
+    window.addEventListener("blur", onBlur);
     return () => {
+      window.removeEventListener("blur", onBlur);
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("keyup", onKeyUp);
     };
@@ -895,7 +910,8 @@ export default function Annotator() {
               {TOOLS.map((t) => (
                 <div key={t.id} className="flex items-center justify-between"><span>{t.label}</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">{t.key}</kbd></div>
               ))}
-              <div className="flex items-center justify-between pt-2"><span>Save</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘S</kbd></div>
+              <div className="flex items-center justify-between pt-2"><span>Edit boxes while held</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">Alt</kbd></div>
+              <div className="flex items-center justify-between"><span>Save</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘S</kbd></div>
               <div className="flex items-center justify-between"><span>Save/Approve → next</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘↵</kbd></div>
               <div className="flex items-center justify-between"><span>Reject → next</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘⇧↵</kbd></div>
               <div className="flex items-center justify-between"><span>Next needing work</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">]</kbd></div>
@@ -918,7 +934,7 @@ export default function Annotator() {
               maxHeight: "calc(100vh - 200px)",
               aspectRatio: imgDims.w / imgDims.h,
               width: `min(${imgDims.w}px, 100%)`,
-              cursor: spaceDown ? (panning ? "grabbing" : "grab") : "crosshair",
+              cursor: spaceDown ? (panning ? "grabbing" : "grab") : selectMode ? "default" : "crosshair",
             }}
             onWheel={onWheel}
           >
@@ -1019,7 +1035,7 @@ export default function Annotator() {
                     height: `${(b.h || 0) * 100}%`,
                     borderColor: labelColor(b.label),
                     boxShadow: isSelected ? `0 0 0 1px ${labelColor(b.label)}` : "none",
-                    pointerEvents: spaceDown ? "none" : "auto",
+                    pointerEvents: spaceDown || !selectMode ? "none" : "auto",
                     cursor: "move",
                     transform: b.rotation ? `rotate(${b.rotation}rad)` : undefined,
                     transformOrigin: "center center",
@@ -1029,7 +1045,7 @@ export default function Annotator() {
                 >
                   <div
                     className="absolute -top-6 left-0 text-[10px] uppercase tracking-wider px-1.5 py-0.5 font-bold flex items-center gap-1 pointer-events-auto"
-                    style={{ background: labelColor(b.label), color: "#000" }}
+                    style={{ background: labelColor(b.label), color: "#000", pointerEvents: spaceDown ? "none" : "auto" }}
                     onMouseDown={(e) => e.stopPropagation()}
                   >
                     {readOnly ? <span>{b.label}</span> : (
@@ -1084,7 +1100,7 @@ export default function Annotator() {
                     </button>
                   </div>
                   {/* Resize handles (only when selected) */}
-                  {isSelected && handles.map((h) => (
+                  {isSelected && selectMode && handles.map((h) => (
                     <div
                       key={h.pos}
                       className="absolute w-2.5 h-2.5 bg-[#050505] border-2"
@@ -1098,7 +1114,7 @@ export default function Annotator() {
                     />
                   ))}
                   {/* Rotate handle above the box (below it when too close to the top edge) */}
-                  {isSelected && !readOnly && (() => {
+                  {isSelected && selectMode && !readOnly && (() => {
                     const below = (b.y || 0) < 0.06;
                     return (
                       <>
@@ -1157,6 +1173,11 @@ export default function Annotator() {
               </div>
             )}
             </div>
+            {selectMode && !spaceDown && (
+              <div className="absolute top-2 left-2 bg-[#050505]/90 border border-[#27272A] text-[10px] uppercase tracking-[0.2em] text-primary px-2 py-1 pointer-events-none z-10" data-testid="select-mode-badge">
+                SELECT MODE
+              </div>
+            )}
             {spaceDown && (
               <div className="absolute top-2 left-2 bg-[#050505]/90 border border-[#27272A] text-[10px] uppercase tracking-[0.2em] text-primary px-2 py-1 pointer-events-none z-10">
                 PAN MODE
