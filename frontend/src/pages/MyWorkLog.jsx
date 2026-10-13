@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Upload, Trash2, Plus } from "lucide-react";
+import { Upload, Trash2, Plus, Pencil, Check, X } from "lucide-react";
 import Navbar from "@/components/Navbar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,20 +16,35 @@ export default function MyWorkLog() {
   const [rows, setRows] = useState([]);
   const [form, setForm] = useState(blank());
   const [busy, setBusy] = useState(false);
+  const [editingId, setEditingId] = useState(null); // null = the form adds a new entry
   const fileRef = useRef(null);
+  const formRef = useRef(null);
 
   const load = () => api.get("/work-logs").then((r) => setRows(r.data)).catch(() => toast.error("Failed to load work log"));
   useEffect(() => { load(); }, []);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
+  const startEdit = (w) => {
+    setEditingId(w.id);
+    setForm({
+      date: w.date, product: w.product || "", project_name: w.project_name || "", task: w.task || "",
+      frames: String(w.frames ?? ""), verified_by: w.verified_by || "", notes: w.notes || "",
+    });
+    formRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+  const cancelEdit = () => { setEditingId(null); setForm((f) => ({ ...blank(), date: f.date })); };
+
   const add = async (e) => {
     e.preventDefault();
     setBusy(true);
     try {
-      await api.post("/work-logs", { ...form, frames: parseInt(form.frames || "0", 10) });
+      const body = { ...form, frames: parseInt(form.frames || "0", 10) };
+      if (editingId) await api.patch(`/work-logs/${editingId}`, body);
+      else await api.post("/work-logs", body);
+      toast.success(editingId ? "Entry updated" : "Entry added");
+      setEditingId(null);
       setForm((f) => ({ ...blank(), date: f.date }));
-      toast.success("Entry added");
       load();
     } catch (err) { toast.error(err.response?.data?.detail || "Could not save"); }
     finally { setBusy(false); }
@@ -37,7 +52,7 @@ export default function MyWorkLog() {
 
   const remove = async (id) => {
     if (!window.confirm("Delete this entry?")) return;
-    try { await api.delete(`/work-logs/${id}`); load(); } catch { toast.error("Delete failed"); }
+    try { await api.delete(`/work-logs/${id}`); if (id === editingId) cancelEdit(); load(); } catch { toast.error("Delete failed"); }
   };
 
   const upload = async (e) => {
@@ -69,7 +84,7 @@ export default function MyWorkLog() {
           </div>
         </div>
 
-        <form onSubmit={add} className="panel p-4 grid grid-cols-2 md:grid-cols-6 gap-3 items-end">
+        <form ref={formRef} onSubmit={add} onKeyDown={(e) => { if (e.key === "Escape" && editingId) cancelEdit(); }} className={`panel p-4 grid grid-cols-2 md:grid-cols-6 gap-3 items-end ${editingId ? "border-primary" : ""}`}>
           <label className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Date
             <Input type="date" required value={form.date} onChange={set("date")} className={field} data-testid={WORK_LOG.date} /></label>
           <label className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Project
@@ -85,8 +100,13 @@ export default function MyWorkLog() {
           <label className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground col-span-2 md:col-span-4">Notes
             <Input value={form.notes} onChange={set("notes")} className={field} /></label>
           <Button type="submit" disabled={busy} className="rounded-sm bg-primary text-black hover:bg-cyan-400 h-9 text-xs uppercase tracking-[0.2em] font-bold" data-testid={WORK_LOG.save}>
-            <Plus className="w-4 h-4 mr-1" /> Add entry
+            {editingId ? <><Check className="w-4 h-4 mr-1" /> Save changes</> : <><Plus className="w-4 h-4 mr-1" /> Add entry</>}
           </Button>
+          {editingId && (
+            <Button type="button" variant="outline" onClick={cancelEdit} className="rounded-sm border-[#27272A] h-9 text-xs uppercase tracking-[0.2em]" data-testid={WORK_LOG.cancel}>
+              <X className="w-4 h-4 mr-1" /> Cancel edit
+            </Button>
+          )}
         </form>
 
         <div className="panel overflow-x-auto">
@@ -96,12 +116,15 @@ export default function MyWorkLog() {
             </TableRow></TableHeader>
             <TableBody>
               {rows.map((w) => (
-                <TableRow key={w.id} className="border-[#27272A]" data-testid={WORK_LOG.row(w.id)}>
+                <TableRow key={w.id} className={`border-[#27272A] ${editingId === w.id ? "bg-[#1C1C1C]" : ""}`} data-testid={WORK_LOG.row(w.id)}>
                   <TableCell className="whitespace-nowrap">{w.date}</TableCell><TableCell>{w.day}</TableCell>
                   <TableCell>{w.product}</TableCell><TableCell>{w.project_name}</TableCell>
-                  <TableCell className="text-xs max-w-[320px]">{w.task}</TableCell>
+                  <TableCell className="text-xs max-w-[320px]">{w.task}{w.notes && <div className="text-muted-foreground mt-0.5">{w.notes}</div>}</TableCell>
                   <TableCell className="tabular-nums font-bold">{w.frames}</TableCell><TableCell>{w.verified_by}</TableCell>
-                  <TableCell><button onClick={() => remove(w.id)} aria-label="Delete entry" className="text-muted-foreground hover:text-[#EF4444]" data-testid={WORK_LOG.delete(w.id)}><Trash2 className="w-4 h-4" /></button></TableCell>
+                  <TableCell className="whitespace-nowrap">
+                    <button onClick={() => startEdit(w)} aria-label="Edit entry" className="text-muted-foreground hover:text-primary mr-3" data-testid={WORK_LOG.edit(w.id)}><Pencil className="w-4 h-4" /></button>
+                    <button onClick={() => remove(w.id)} aria-label="Delete entry" className="text-muted-foreground hover:text-[#EF4444]" data-testid={WORK_LOG.delete(w.id)}><Trash2 className="w-4 h-4" /></button>
+                  </TableCell>
                 </TableRow>))}
             </TableBody>
           </Table>

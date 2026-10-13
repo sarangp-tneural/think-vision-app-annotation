@@ -24,4 +24,6 @@ export const WORK_LOG = {
   save: "worklog-save-btn",
   row: (id) => `worklog-row-${id}`,
   delete: (id) => `worklog-delete-${id}`,
+  edit: (id) => `worklog-edit-${id}`,
+  cancel: "worklog-cancel-btn",
 };

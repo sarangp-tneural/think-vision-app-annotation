@@ -155,3 +155,16 @@ def test_normal_login_returns_role_so_managers_reach_their_dashboard(client, wor
     assert r.status_code == 200 and r.json()["user"]["role"] == "manager"
     r = client.post("/api/auth/login", json={"email": "alice@example.com", "password": "pw123456"})
     assert r.json()["user"]["role"] == "user"
+
+
+def test_work_log_entry_can_be_edited_by_its_owner_only(client, world):
+    r = client.post("/api/work-logs", json={"date": TODAY, "project_name": "Edit", "task": "t", "frames": 5}, headers=world["bob"])
+    assert r.status_code == 200, r.text
+    lid = r.json()["id"]
+    r = client.patch(f"/api/work-logs/{lid}", json={"frames": 9, "date": YESTERDAY, "notes": "fixed"}, headers=world["bob"])
+    assert r.status_code == 200, r.text
+    row = next(w for w in client.get("/api/work-logs", headers=world["bob"]).json() if w["id"] == lid)
+    assert row["frames"] == 9 and row["date"] == YESTERDAY and row["notes"] == "fixed" and row["project_name"] == "Edit"
+    assert row["day"] == (date.today() - timedelta(days=1)).strftime("%A")
+    assert client.patch(f"/api/work-logs/{lid}", json={"frames": 1}, headers=world["alice"]).status_code == 404
+    assert client.patch(f"/api/work-logs/{lid}", json={"date": "nope"}, headers=world["bob"]).status_code == 400
