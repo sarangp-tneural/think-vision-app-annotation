@@ -16,8 +16,11 @@ import {
   Save, Sparkles, Trash2, ArrowLeft, ArrowRight, Undo2, Copy,
   Square, Hexagon, Slash, Dot, Circle as CircleIcon, Keyboard,
   ZoomIn, ZoomOut, Maximize2, Send, CheckCircle2, XCircle, UserPlus,
-  MessageSquare, Reply, Check, Pencil, RotateCw,
+  MessageSquare, Reply, Check, Pencil, RotateCw, ChevronDown,
 } from "lucide-react";
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
+} from "@/components/ui/dropdown-menu";
 
 const COLORS = ["#06B6D4", "#D946EF", "#EAB308", "#22C55E", "#EF4444", "#F97316", "#3B82F6"];
 
@@ -335,6 +338,7 @@ export default function Annotator() {
   const deleteBox = (i) => commitBoxes(boxes.filter((_, idx) => idx !== i));
   const undo = () => commitBoxes(boxes.slice(0, -1));
   const changeLabel = (i, newLabel) => {
+    if (readOnly) return;
     const next = boxes.slice();
     next[i] = { ...next[i], label: newLabel };
     commitBoxes(next);
@@ -1028,7 +1032,39 @@ export default function Annotator() {
                     style={{ background: labelColor(b.label), color: "#000" }}
                     onMouseDown={(e) => e.stopPropagation()}
                   >
-                    <span>{b.label}</span>
+                    {readOnly ? <span>{b.label}</span> : (
+                      <DropdownMenu onOpenChange={(open) => { if (open) setSelectedIdx(i); }}>
+                        <DropdownMenuTrigger
+                          className="flex items-center gap-0.5 uppercase tracking-wider font-bold outline-none hover:underline"
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => e.stopPropagation()}
+                          title="Change class"
+                          data-testid={`bbox-label-menu-${i}`}
+                        >
+                          <span>{b.label}</span>
+                          <ChevronDown className="w-2.5 h-2.5" />
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          align="start"
+                          className="bg-[#121212] border-[#27272A] rounded-sm max-h-72 overflow-y-auto"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <DropdownMenuLabel className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Change class</DropdownMenuLabel>
+                          {project.classes.map((c) => (
+                            <DropdownMenuItem
+                              key={c}
+                              onSelect={() => changeLabel(i, c)}
+                              className="text-xs gap-2 cursor-pointer"
+                              data-testid={`bbox-label-option-${c}`}
+                            >
+                              <span className="w-2.5 h-2.5 flex-shrink-0" style={{ background: labelColor(c) }} />
+                              <span className="flex-1">{c}</span>
+                              {c === b.label && <Check className="w-3 h-3" />}
+                            </DropdownMenuItem>
+                          ))}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
                     {b.confidence != null && project?.settings?.show_confidence !== false && (
                       <span className="opacity-80" data-testid={`confidence-${i}`}>{Math.round(b.confidence * 100)}%</span>
                     )}
