@@ -246,8 +246,6 @@ def register(s):
             raise HTTPException(status_code=400, detail="Invalid decision")
         if img.get("review_status") != "submitted":
             raise HTTPException(status_code=409, detail="Only submitted images can be reviewed")
-        if payload.decision == "reject" and not (payload.notes or "").strip():
-            raise HTTPException(status_code=400, detail="Add a note explaining what to fix")
         # Nobody reviews their own work, unless they are the only person who could (solo workspace).
         if current["id"] in (img.get("annotated_by"), img.get("assigned_to")) and tid \
                 and await s._has_other_reviewer(tid, current["id"]):

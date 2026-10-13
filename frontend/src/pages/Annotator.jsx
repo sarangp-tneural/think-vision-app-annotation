@@ -624,7 +624,6 @@ export default function Annotator() {
 
   const fastReview = async (decision, notes = "") => {
     if (fastBusy || fastAction !== "review") return;
-    if (decision === "reject" && !notes.trim()) { toast.error("Add a note so the annotator knows what to fix"); return; }
     setFastBusy(true);
     try {
       const [, nextId] = await Promise.all([
@@ -1317,7 +1316,7 @@ export default function Annotator() {
                       if (e.key === "Escape") { setRejecting(false); }
                       else if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); fastReview("reject", rejectNote); }
                     }}
-                    placeholder="What needs to be fixed? (Enter to reject → next)"
+                    placeholder="Note for the annotator (optional) · Enter to reject → next"
                     rows={3}
                     className="w-full rounded-sm bg-transparent border border-[#27272A] text-xs p-2 focus:outline-none focus:border-destructive"
                     data-testid="reject-note-input"

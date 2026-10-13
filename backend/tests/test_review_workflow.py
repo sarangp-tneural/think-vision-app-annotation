@@ -95,8 +95,7 @@ def test_full_reject_reannotate_resubmit_approve_cycle(client, db, world):
     assert client.post(f"/api/images/{iid}/submit", headers=world["ann"]).status_code == 409
     # annotators cannot review
     assert client.post(f"/api/images/{iid}/review", json={"decision": "approve"}, headers=world["ann"]).status_code == 403
-    # reject needs a note
-    assert client.post(f"/api/images/{iid}/review", json={"decision": "reject"}, headers=world["rev"]).status_code == 400
+    # a note is optional when rejecting
     r = client.post(f"/api/images/{iid}/review", json={"decision": "reject", "notes": "box too loose"}, headers=world["rev"])
     assert r.status_code == 200
     assert db.images.find_one({"id": iid})["review_status"] == "rejected"
@@ -244,3 +243,13 @@ def test_assist_model_activation_rules(client, db, world):
     db.models.insert_one({"id": "m-prod", "project_id": pid, "user_id": world["ann_id"], "type": "real",
                           "source": "pipeline", "status": "trained", "weights_path": "/tmp/w.pt", "created_at": NOW})
     assert client.post("/api/models/m-prod/activate", headers=world["ann"]).status_code == 403
+
+
+def test_reject_without_a_note_is_allowed(client, db, world):
+    iid = "rw-nonote"
+    db.images.delete_many({"id": iid})
+    db.images.insert_one({"id": iid, "project_id": world["pid"], "review_status": "submitted", "assigned_to": world["ann_id"],
+                          "annotations": [BOX], "created_at": datetime.now(timezone.utc).isoformat()})
+    assert client.post(f"/api/images/{iid}/review", json={"decision": "reject"}, headers=world["rev"]).status_code == 200
+    img = db.images.find_one({"id": iid})
+    assert img["review_status"] == "rejected" and img["review_notes"] == ""
