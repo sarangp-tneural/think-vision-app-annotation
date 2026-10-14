@@ -154,29 +154,31 @@ export default function Annotator() {
   const getPos = (e) => {
     // e.clientX/Y → position in the transformed image content, normalized 0-1
     const rect = containerRef.current.getBoundingClientRect();
-    // Screen coords within container
-    const sx = e.clientX - rect.left;
-    const sy = e.clientY - rect.top;
-    // Reverse transform: container renders content translated by pan then scaled by zoom
-    // We use CSS transform: translate(pan) scale(zoom) on inner container
-    // So image-space position = (screen - pan) / zoom, then / containerSize
-    const ix = (sx - pan.x) / zoom;
-    const iy = (sy - pan.y) / zoom;
-    const x = ix / rect.width;
-    const y = iy / rect.height;
+    // The container is the transformed element, so its rect already includes pan and zoom
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
     return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
   };
 
+  // Keep the zoomed image covering the viewport so it can't be panned out of view
+  const clampPan = (x, y, z) => {
+    const vp = viewportRef.current;
+    if (!vp || z <= 1) return { x: 0, y: 0 };
+    const W = vp.clientWidth, H = vp.clientHeight;
+    return { x: Math.max(W - W * z, Math.min(0, x)), y: Math.max(H - H * z, Math.min(0, y)) };
+  };
+
   const zoomAt = (factor, screenX, screenY) => {
-    const rect = containerRef.current.getBoundingClientRect();
-    const sx = screenX - rect.left;
-    const sy = screenY - rect.top;
+    // Cursor relative to the untransformed viewport (the container's rect already includes pan/zoom)
+    const vp = viewportRef.current.getBoundingClientRect();
+    const sx = screenX - vp.left - viewportRef.current.clientLeft;
+    const sy = screenY - vp.top - viewportRef.current.clientTop;
     const newZoom = Math.max(1, Math.min(8, zoom * factor));
     // Zoom around the cursor: new pan such that (sx-panNew)/newZoom === (sx-pan)/zoom
     const nx = sx - ((sx - pan.x) / zoom) * newZoom;
     const ny = sy - ((sy - pan.y) / zoom) * newZoom;
     setZoom(newZoom);
-    setPan({ x: newZoom === 1 ? 0 : nx, y: newZoom === 1 ? 0 : ny });
+    setPan(clampPan(nx, ny, newZoom));
   };
 
   const resetView = () => { setZoom(1); setPan({ x: 0, y: 0 }); };
@@ -184,7 +186,7 @@ export default function Annotator() {
   const onWheel = (e) => {
     if (!e.ctrlKey && !e.metaKey) return; // only zoom when Ctrl/Cmd held
     e.preventDefault();
-    zoomAt(e.deltaY < 0 ? 1.2 : 1 / 1.2, e.clientX, e.clientY);
+    zoomAt(Math.exp(-e.deltaY * 0.0015), e.clientX, e.clientY);
   };
 
   const commitBoxes = (next) => {
@@ -244,7 +246,7 @@ export default function Annotator() {
     if (panning) {
       const dx = e.clientX - panning.startX;
       const dy = e.clientY - panning.startY;
-      setPan({ x: panning.origX + dx, y: panning.origY + dy });
+      setPan(clampPan(panning.origX + dx, panning.origY + dy, zoom));
       return;
     }
     // Handle bbox edit (move/resize/rotate)
@@ -257,8 +259,8 @@ export default function Annotator() {
         const cxN = o.x + o.w / 2;
         const cyN = o.y + o.h / 2;
         // Convert mouse client → normalized inside container (accounting for zoom/pan)
-        const px = (e.clientX - rect.left) / zoom / rect.width;
-        const py = (e.clientY - rect.top) / zoom / rect.height;
+        const px = (e.clientX - rect.left) / rect.width;
+        const py = (e.clientY - rect.top) / rect.height;
         // Aspect-correct so rotation feels natural regardless of image dims
         const dx = (px - cxN) * rect.width;
         const dy = (py - cyN) * rect.height;
@@ -270,8 +272,8 @@ export default function Annotator() {
         commitBoxes(next);
         return;
       }
-      const dxN = (e.clientX - editing.startX) / zoom / rect.width;
-      const dyN = (e.clientY - editing.startY) / zoom / rect.height;
+      const dxN = (e.clientX - editing.startX) / rect.width;
+      const dyN = (e.clientY - editing.startY) / rect.height;
       let nx = o.x, ny = o.y, nw = o.w, nh = o.h;
       if (m === "move") { nx = o.x + dxN; ny = o.y + dyN; }
       else if (m === "resize-nw") { nx = o.x + dxN; ny = o.y + dyN; nw = o.w - dxN; nh = o.h - dyN; }
@@ -324,6 +326,21 @@ export default function Annotator() {
     }
     setDrawing(null);
   };
+
+  // While drawing, keep tracking the pointer outside the canvas (clamped to the image edge)
+  // and let a release anywhere finish the shape.
+  useEffect(() => {
+    if (!drawing) return undefined;
+    const outside = (e) => !containerRef.current?.contains(e.target);
+    const move = (e) => { if (outside(e)) onMouseMove(e); };
+    const up = (e) => { if (outside(e)) onMouseUp(); };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+  });
 
   const onCanvasClick = (e) => {
     if (spaceDown || selectMode) return;
@@ -963,21 +980,25 @@ export default function Annotator() {
               <div className="flex items-center justify-between"><span>Repeat previous</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">R</kbd></div>
               <div className="flex items-center justify-between"><span>Rotate box 1° (⇧ 15°)</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">, .</kbd></div>
               <div className="flex items-center justify-between"><span>Finish polygon</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">↵</kbd></div>
+              <div className="flex items-center justify-between pt-2"><span>Zoom in / out</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">Ctrl + wheel</kbd></div>
+              <div className="flex items-center justify-between"><span>Zoom in / out (keys)</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">+ -</kbd></div>
+              <div className="flex items-center justify-between"><span>Reset zoom</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">0</kbd></div>
+              <div className="flex items-center justify-between"><span>Pan image</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">Space + drag</kbd></div>
               <div className="flex items-center justify-between"><span>Cancel</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">Esc</kbd></div>
             </div>
           </div>
         </aside>
 
         {/* Center: canvas */}
-        <main className="flex-1 bg-[#050505] flex items-center justify-center p-6 overflow-hidden relative">
+        <main className="flex-1 bg-[#050505] flex items-start justify-center p-6 overflow-hidden relative">
           <div
             ref={viewportRef}
             className="relative border border-[#27272A] overflow-hidden bg-[#0a0a0a]"
             style={{
               maxWidth: "100%",
-              maxHeight: "calc(100vh - 200px)",
               aspectRatio: imgDims.w / imgDims.h,
-              width: `min(${imgDims.w}px, 100%)`,
+              // width capped so height stays within the viewport while keeping the exact image aspect (no letterbox)
+              width: `min(${imgDims.w}px, 100%, calc((100vh - 200px) * ${imgDims.w / imgDims.h}))`,
               cursor: spaceDown ? (panning ? "grabbing" : "grab") : selectMode ? "default" : "crosshair",
             }}
             onWheel={onWheel}
@@ -987,7 +1008,7 @@ export default function Annotator() {
               onMouseDown={onMouseDown}
               onMouseMove={onMouseMove}
               onMouseUp={onMouseUp}
-              onMouseLeave={() => { onMouseUp(); setCursor(null); }}
+              onMouseLeave={() => { if (!drawing) onMouseUp(); setCursor(null); }}
               onClick={onCanvasClick}
               onDoubleClick={finishPoly}
               className="absolute inset-0 no-select"
