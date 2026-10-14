@@ -979,7 +979,7 @@ export default function Annotator() {
         </aside>
 
         {/* Center: canvas */}
-        <main className="flex-1 bg-[#050505] flex items-center justify-center p-6 overflow-hidden relative">
+        <main className="flex-1 bg-[#050505] flex items-start justify-center px-6 pb-3 pt-1 overflow-hidden relative">
           <div
             ref={viewportRef}
             className="relative border border-[#27272A] overflow-hidden bg-[#0a0a0a]"
@@ -987,7 +987,7 @@ export default function Annotator() {
               maxWidth: "100%",
               aspectRatio: imgDims.w / imgDims.h,
               // width capped so height stays within the viewport while keeping the exact image aspect (no letterbox)
-              width: `min(${imgDims.w}px, 100%, calc((100vh - 200px) * ${imgDims.w / imgDims.h}))`,
+              width: `min(${imgDims.w}px, 100%, calc((100vh - 150px) * ${imgDims.w / imgDims.h}))`,
               cursor: spaceDown ? (panning ? "grabbing" : "grab") : selectMode ? "default" : "crosshair",
             }}
             onWheel={onWheel}
