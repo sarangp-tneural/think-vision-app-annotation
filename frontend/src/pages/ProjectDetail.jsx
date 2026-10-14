@@ -1122,7 +1122,7 @@ export default function ProjectDetail() {
                     </DialogContent>
                   </Dialog>
                 )}
-                {canManage && (
+                {(
                   <Button
                     variant="outline"
                     size="sm"
@@ -1315,7 +1315,7 @@ export default function ProjectDetail() {
                       <div
                         key={img.id}
                         onClick={(e) => {
-                          if (canManage && (e.shiftKey || e.ctrlKey || e.metaKey || selectedIds.size > 0)) {
+                          if (e.shiftKey || e.ctrlKey || e.metaKey || selectedIds.size > 0) {
                             handleSelectClick(e, img, filtered);
                           } else {
                             navigate(`/projects/${pid}/annotate/${img.id}`);
@@ -1326,7 +1326,7 @@ export default function ProjectDetail() {
                         }`}
                         data-testid={`image-card-${img.id}`}
                       >
-                        {canManage && (
+                        {(
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
