@@ -143,6 +143,24 @@ def test_export_skips_unknown_labels_instead_of_mapping_them_to_class_0(client, 
     assert [a["category_id"] for a in coco["annotations"]] == [1]
 
 
+def test_export_selected_images_skips_unapproved_and_reports_it(client, db, world, monkeypatch):
+    _setup(db, world, ["a", "b"])
+    pid = world["pid"]
+    for iid, status in (("s-1", "approved"), ("s-2", "approved"), ("s-3", "pending")):
+        db.images.insert_one({"id": iid, "project_id": pid, "filename": f"{iid}.jpg", "storage_path": f"p/{iid}.jpg",
+                              "review_status": status, "annotated": True, "created_at": NOW,
+                              "annotations": [_box("a")]})
+    monkeypatch.setattr(_inprocess.server, "get_object", lambda path: (b"img", "image/jpeg"))
+
+    r = client.post(f"/api/projects/{pid}/export", json={"format": "yolo", "image_ids": ["s-1", "s-3"]}, headers=world["owner"])
+    assert r.status_code == 200 and r.headers["X-Skipped-Not-Approved"] == "1"
+    names = zipfile.ZipFile(io.BytesIO(r.content)).namelist()
+    assert "dataset/labels/s-1.txt" in names and "dataset/classes.txt" in names
+    assert not any("s-2" in n or "s-3" in n for n in names)
+
+    assert client.post(f"/api/projects/{pid}/export", json={"format": "yolo", "image_ids": []}, headers=world["owner"]).status_code == 400
+
+
 def test_auto_label_in_locked_project_never_introduces_classes(monkeypatch):
     srv = _inprocess.server
 

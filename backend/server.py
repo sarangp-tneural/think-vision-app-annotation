@@ -1305,6 +1305,11 @@ async def list_versions(pid: str, current=Depends(get_current_user)):
     return versions
 
 
+class ExportRequest(BaseModel):
+    format: str = "yolo"
+    image_ids: Optional[List[str]] = None
+
+
 @api_router.get("/projects/{pid}/export")
 async def export_dataset(
     pid: str,
@@ -1314,8 +1319,24 @@ async def export_dataset(
     test_pct: float = 0.1,
     current=Depends(get_current_user),
 ):
+    return await _export_dataset(pid, format, train_pct, valid_pct, test_pct, None, current)
+
+
+@api_router.post("/projects/{pid}/export")
+async def export_selected_dataset(pid: str, payload: ExportRequest, current=Depends(get_current_user)):
+    """Export only the given images (a GET URL can't carry that many ids). Unapproved ones are skipped."""
+    if not payload.image_ids:
+        raise HTTPException(status_code=400, detail="image_ids is required")
+    if payload.format == "split":
+        raise HTTPException(status_code=400, detail="split export always covers the whole project")
+    return await _export_dataset(pid, payload.format, 0.7, 0.2, 0.1, payload.image_ids, current)
+
+
+async def _export_dataset(pid, format, train_pct, valid_pct, test_pct, image_ids, current):
     project = await _verify_project(pid, current["id"])
     export_filter = {"project_id": pid, **APPROVED, "annotated": True}
+    if image_ids is not None:
+        export_filter["id"] = {"$in": list(image_ids)}
     matching = await db.images.count_documents(export_filter)
     if matching > MAX_ZIP_EXPORT_IMAGES:
         # The zip is built in memory, so refuse loudly instead of silently dropping images.
@@ -1527,6 +1548,7 @@ async def export_dataset(
         headers={
             "Content-Disposition": f"attachment; filename={project['name']}_{format}.zip",
             "X-Skipped-Unknown-Labels": str(skipped_unknown),
+            "X-Skipped-Not-Approved": str(max(0, len(set(image_ids)) - len(images)) if image_ids is not None else 0),
         },
     )
 
@@ -2176,6 +2198,7 @@ app.add_middleware(
     allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "X-Skipped-Unknown-Labels", "X-Skipped-Not-Approved"],
 )
 
 

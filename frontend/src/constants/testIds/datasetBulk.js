@@ -5,3 +5,10 @@ export const DATASET_DELETE = {
   confirm: "delete-images-confirm",
   cancel: "delete-images-cancel",
 };
+
+export const DATASET_EXPORT = {
+  button: "dataset-export-btn",
+  dialog: "dataset-export-dialog",
+  format: "dataset-export-format",
+  confirm: "dataset-export-confirm",
+};

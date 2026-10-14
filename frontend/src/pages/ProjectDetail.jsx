@@ -6,14 +6,14 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { sourceLabel } from "@/lib/autolabel";
 import { renameClass } from "@/lib/renameClass";
-import { CLASSES, IMPORT_DATASET, DUPLICATES, DATASET_DELETE } from "@/constants/testIds";
+import { CLASSES, IMPORT_DATASET, DUPLICATES, DATASET_DELETE, DATASET_EXPORT } from "@/constants/testIds";
 import { countApproved } from "@/lib/deleteSelection";
 import {
   AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogCancel,
 } from "@/components/ui/alert-dialog";
 import ImportDatasetDialog from "@/components/ImportDatasetDialog";
 import DuplicatesDialog from "@/components/DuplicatesDialog";
-import { Upload, Sparkles, ImageIcon, GitBranch, Rocket, CheckCircle2, Trash2, Video, Film, Loader2, XCircle, Clock, Send, UserPlus, Activity as ActivityIcon, Settings, TrendingUp, Pencil, PackagePlus, Lock, Copy } from "lucide-react";
+import { Upload, Sparkles, ImageIcon, GitBranch, Rocket, CheckCircle2, Trash2, Video, Film, Loader2, XCircle, Clock, Send, UserPlus, Activity as ActivityIcon, Settings, TrendingUp, Pencil, PackagePlus, Lock, Copy, Download } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -51,6 +51,9 @@ export default function ProjectDetail() {
   // Anchor for shift+click range selection (the last image clicked).
   const lastSelectedIdRef = useRef(null);
   const [bulkOpen, setBulkOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportFormat, setExportFormat] = useState("yolo");
+  const [exporting, setExporting] = useState(false);
   const [bulkUser, setBulkUser] = useState("");
   const [bulkMode, setBulkMode] = useState("single"); // "single" | "split"
   const [bulkFor, setBulkFor] = useState("annotate"); // "annotate" | "review"
@@ -331,6 +334,32 @@ export default function ProjectDetail() {
       lastSelectedIdRef.current = img.id;
     }
     setSelectedIds(next);
+  };
+
+  // Zip of the selected images (or every approved image when nothing is selected) with their annotations
+  const runExport = async () => {
+    setExporting(true);
+    try {
+      const ids = [...selectedIds];
+      const res = ids.length
+        ? await api.post(`/projects/${pid}/export`, { format: exportFormat, image_ids: ids }, { responseType: "blob" })
+        : await api.get(`/projects/${pid}/export`, { params: { format: exportFormat }, responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${project.name}_${exportFormat}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+      const skipped = parseInt(res.headers["x-skipped-not-approved"] || "0", 10);
+      toast.success(skipped ? `Exported. ${skipped} selected image${skipped !== 1 ? "s were" : " was"} not approved and skipped` : "Exported");
+      setExportOpen(false);
+    } catch (e) {
+      let detail = "Export failed";
+      try { detail = JSON.parse(await e.response.data.text()).detail || detail; } catch { /* keep default */ }
+      toast.error(detail);
+    } finally {
+      setExporting(false);
+    }
   };
 
   const askDelete = (ids, e) => {
@@ -869,6 +898,38 @@ export default function ProjectDetail() {
               </div>
 
               <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => setExportOpen(true)}
+                  className="rounded-sm border-[#27272A] bg-transparent text-xs uppercase tracking-[0.2em]"
+                  data-testid={DATASET_EXPORT.button}
+                >
+                  <Download className="w-3 h-3 mr-2" /> {selectedIds.size > 0 ? `Export (${selectedIds.size})` : "Export all"}
+                </Button>
+                <Dialog open={exportOpen} onOpenChange={(o) => { if (!exporting) setExportOpen(o); }}>
+                  <DialogContent className="bg-[#0a0a0a] border-[#27272A] rounded-sm" data-testid={DATASET_EXPORT.dialog}>
+                    <DialogHeader><DialogTitle>{selectedIds.size > 0 ? `Export ${selectedIds.size} selected image${selectedIds.size !== 1 ? "s" : ""}` : "Export all images"}</DialogTitle></DialogHeader>
+                    <div className="space-y-3">
+                      <Label className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Format</Label>
+                      <Select value={exportFormat} onValueChange={setExportFormat}>
+                        <SelectTrigger className="rounded-sm bg-transparent border-[#27272A]" data-testid={DATASET_EXPORT.format}><SelectValue /></SelectTrigger>
+                        <SelectContent className="bg-[#121212] border-[#27272A] rounded-sm">
+                          <SelectItem value="yolo">YOLO</SelectItem>
+                          <SelectItem value="yolo_obb">YOLO OBB</SelectItem>
+                          <SelectItem value="coco">COCO</SelectItem>
+                          <SelectItem value="voc">Pascal VOC</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">Downloads a zip with the images and their annotations. Only approved images are included.</p>
+                    </div>
+                    <DialogFooter>
+                      <Button variant="outline" onClick={() => setExportOpen(false)} disabled={exporting} className="rounded-sm border-[#27272A] bg-transparent text-xs uppercase tracking-[0.2em]">Cancel</Button>
+                      <Button onClick={runExport} disabled={exporting} className="rounded-sm text-xs uppercase tracking-[0.2em] font-bold" data-testid={DATASET_EXPORT.confirm}>
+                        {exporting ? <Loader2 className="w-3 h-3 mr-2 animate-spin" /> : <Download className="w-3 h-3 mr-2" />} {exporting ? "Exporting..." : "Download zip"}
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
                 {canManage && selectedIds.size > 0 && (
                   <Button
                     variant="outline"
