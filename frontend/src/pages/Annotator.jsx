@@ -778,7 +778,7 @@ export default function Annotator() {
   }
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    <div className="h-screen overflow-hidden bg-background flex flex-col">
       <Navbar crumbs={[
         { label: "Projects", to: "/dashboard" },
         { label: project.name, to: `/projects/${pid}` },
@@ -897,7 +897,7 @@ export default function Annotator() {
       </div>
 
       {/* Three-pane workspace */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* Left sidebar: class list */}
         <aside className="w-64 border-r border-[#27272A] bg-[#0a0a0a] p-4 flex-shrink-0 overflow-y-auto">
           <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-3">Active Class</div>
