@@ -1104,6 +1104,7 @@ export default function Annotator() {
                   onMouseDown={(e) => startEdit(e, i, "move")}
                   data-testid={`bbox-${i}`}
                 >
+                  {selectMode && (
                   <div
                     className="absolute -top-6 left-0 text-[10px] uppercase tracking-wider px-1.5 py-0.5 font-bold flex items-center gap-1 pointer-events-auto"
                     style={{ background: labelColor(b.label), color: "#000", pointerEvents: spaceDown ? "none" : "auto" }}
@@ -1160,6 +1161,7 @@ export default function Annotator() {
                       <Trash2 className="w-2.5 h-2.5" />
                     </button>
                   </div>
+                  )}
                   {/* Resize handles (only when selected) */}
                   {isSelected && selectMode && handles.map((h) => (
                     <div
