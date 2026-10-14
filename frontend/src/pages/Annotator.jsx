@@ -155,10 +155,15 @@ export default function Annotator() {
     // e.clientX/Y → position in the transformed image content, normalized 0-1
     const rect = containerRef.current.getBoundingClientRect();
     // Screen coords within container
-    // The container is the transformed element, so its rect already includes pan and zoom
-    // and exactly matches the image; clamping keeps the pointer pinned to the image edge.
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    // Reverse transform: container renders content translated by pan then scaled by zoom
+    // We use CSS transform: translate(pan) scale(zoom) on inner container
+    // So image-space position = (screen - pan) / zoom, then / containerSize
+    const ix = (sx - pan.x) / zoom;
+    const iy = (sy - pan.y) / zoom;
+    const x = ix / rect.width;
+    const y = iy / rect.height;
     return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
   };
 
@@ -319,21 +324,6 @@ export default function Annotator() {
     }
     setDrawing(null);
   };
-
-  // While drawing, keep tracking the pointer outside the canvas (clamped to the image edge)
-  // and let a release anywhere finish the shape.
-  useEffect(() => {
-    if (!drawing) return undefined;
-    const outside = (e) => !containerRef.current?.contains(e.target);
-    const move = (e) => { if (outside(e)) onMouseMove(e); };
-    const up = (e) => { if (outside(e)) onMouseUp(); };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-    return () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-    };
-  });
 
   const onCanvasClick = (e) => {
     if (spaceDown || selectMode) return;
@@ -979,15 +969,15 @@ export default function Annotator() {
         </aside>
 
         {/* Center: canvas */}
-        <main className="flex-1 bg-[#050505] flex items-start justify-center px-6 pb-3 pt-1 overflow-hidden relative">
+        <main className="flex-1 bg-[#050505] flex items-center justify-center p-6 overflow-hidden relative">
           <div
             ref={viewportRef}
             className="relative border border-[#27272A] overflow-hidden bg-[#0a0a0a]"
             style={{
               maxWidth: "100%",
+              maxHeight: "calc(100vh - 200px)",
               aspectRatio: imgDims.w / imgDims.h,
-              // width capped so height stays within the viewport while keeping the exact image aspect (no letterbox)
-              width: `min(${imgDims.w}px, 100%, calc((100vh - 150px) * ${imgDims.w / imgDims.h}))`,
+              width: `min(${imgDims.w}px, 100%)`,
               cursor: spaceDown ? (panning ? "grabbing" : "grab") : selectMode ? "default" : "crosshair",
             }}
             onWheel={onWheel}
@@ -997,7 +987,7 @@ export default function Annotator() {
               onMouseDown={onMouseDown}
               onMouseMove={onMouseMove}
               onMouseUp={onMouseUp}
-              onMouseLeave={() => { if (!drawing) onMouseUp(); setCursor(null); }}
+              onMouseLeave={() => { onMouseUp(); setCursor(null); }}
               onClick={onCanvasClick}
               onDoubleClick={finishPoly}
               className="absolute inset-0 no-select"
