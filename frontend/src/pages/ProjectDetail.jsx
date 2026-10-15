@@ -41,6 +41,7 @@ export default function ProjectDetail() {
   const [renaming, setRenaming] = useState(null); // { from, value }
   const [bulkClassOpen, setBulkClassOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [assigneeFilter, setAssigneeFilter] = useState("all");
   const [batchJob, setBatchJob] = useState(null);
   // Team assignment state
   const [members, setMembers] = useState([]);
@@ -108,6 +109,12 @@ export default function ProjectDetail() {
   };
 
   const canManage = myRole === "owner" || myRole === "admin";
+  const matchesFilters = (img) =>
+    (statusFilter === "all" || (img.review_status || "unassigned") === statusFilter) &&
+    (assigneeFilter === "all" ||
+      (assigneeFilter === "unassigned" ? !img.assigned_to : img.assigned_to === assigneeFilter));
+  const assigneeCount = (uid) => images.filter((img) => (uid === "unassigned" ? !img.assigned_to : img.assigned_to === uid)).length;
+  const assigneeName = (uid) => members.find((m) => m.user_id === uid)?.name;
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [pid]);
 
@@ -897,6 +904,23 @@ export default function ProjectDetail() {
                 ))}
               </div>
 
+              {canManage && (
+                <Select value={assigneeFilter} onValueChange={setAssigneeFilter}>
+                  <SelectTrigger className="w-[220px] rounded-sm border-[#27272A] bg-transparent text-xs" data-testid="assignee-filter">
+                    <SelectValue placeholder="All members" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All members ({images.length})</SelectItem>
+                    <SelectItem value="unassigned">Unassigned ({assigneeCount("unassigned")})</SelectItem>
+                    {members.map((m) => (
+                      <SelectItem key={m.user_id} value={m.user_id}>
+                        {m.name} ({assigneeCount(m.user_id)})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
@@ -1071,7 +1095,7 @@ export default function ProjectDetail() {
                               if (bulkFor === "review") {
                                 // Grid order, so each reviewer's block matches what the user sees.
                                 const shownIds = images
-                                  .filter((img) => statusFilter === "all" || (img.review_status || "unassigned") === statusFilter)
+                                  .filter(matchesFilters)
                                   .map((img) => img.id).filter((id) => selectedIds.has(id));
                                 const shownSet = new Set(shownIds);
                                 selectedIds.forEach((id) => { if (!shownSet.has(id)) shownIds.push(id); });
@@ -1082,7 +1106,7 @@ export default function ProjectDetail() {
                               } else if (split) {
                                 // Grid order, so each member's block matches what the user sees.
                                 const orderedIds = images
-                                  .filter((img) => statusFilter === "all" || (img.review_status || "unassigned") === statusFilter)
+                                  .filter(matchesFilters)
                                   .map((img) => img.id).filter((id) => selectedIds.has(id));
                                 // Selected images hidden by the status filter go last so none are dropped.
                                 const shown = new Set(orderedIds);
@@ -1127,7 +1151,7 @@ export default function ProjectDetail() {
                     variant="outline"
                     size="sm"
                     onClick={() => {
-                      const filtered = images.filter((img) => statusFilter === "all" || (img.review_status || "unassigned") === statusFilter);
+                      const filtered = images.filter(matchesFilters);
                       const filteredIds = filtered.map((i) => i.id);
                       const allSelected = filteredIds.every((id) => selectedIds.has(id));
                       if (allSelected) {
@@ -1147,7 +1171,7 @@ export default function ProjectDetail() {
                     title="Tip: Shift+click photos to select a range, Ctrl/Cmd+click to add or remove one"
                   >
                     {(() => {
-                      const filtered = images.filter((img) => statusFilter === "all" || (img.review_status || "unassigned") === statusFilter);
+                      const filtered = images.filter(matchesFilters);
                       const filteredIds = filtered.map((i) => i.id);
                       const allSelected = filteredIds.length > 0 && filteredIds.every((id) => selectedIds.has(id));
                       return allSelected ? `Deselect All (${filteredIds.length})` : `Select All (${filteredIds.length})`;
@@ -1287,16 +1311,16 @@ export default function ProjectDetail() {
             )}
 
             {(() => {
-              const filtered = images.filter((img) => statusFilter === "all" || (img.review_status || "unassigned") === statusFilter);
+              const filtered = images.filter(matchesFilters);
               if (filtered.length === 0) {
                 return (
                   <div className="border border-dashed border-[#27272A] p-16 text-center">
                     <ImageIcon className="w-10 h-10 text-muted-foreground mx-auto mb-6" strokeWidth={1.5} />
                     <h3 className="font-heading text-xl mb-2">
-                      {statusFilter === "all" ? "No images yet" : `No ${statusFilter} images`}
+                      {statusFilter === "all" && assigneeFilter === "all" ? "No images yet" : "No matching images"}
                     </h3>
                     <p className="text-sm text-muted-foreground mb-6">
-                      {statusFilter === "all" ? "Upload images or extract frames from a video." : "Try a different filter or start annotating."}
+                      {statusFilter === "all" && assigneeFilter === "all" ? "Upload images or extract frames from a video." : "Try a different filter or start annotating."}
                     </p>
                   </div>
                 );
@@ -1374,6 +1398,9 @@ export default function ProjectDetail() {
                         </div>
                         <div className="p-2 border-t border-[#27272A]">
                           <div className="text-[10px] truncate text-muted-foreground">{img.filename}</div>
+                          <div className="text-[10px] truncate text-muted-foreground" data-testid={`assignee-${img.id}`}>
+                            {img.assigned_to ? (assigneeName(img.assigned_to) || "Unknown member") : "Unassigned"}
+                          </div>
                           <div className="text-[10px] text-primary mt-1">
                             {img.annotation_count || 0} annotation{(img.annotation_count || 0) !== 1 ? "s" : ""}
                           </div>
