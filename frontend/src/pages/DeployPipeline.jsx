@@ -164,9 +164,17 @@ export default function DeployPipeline({ pid, project }) {
   // Numeric fields come off <input> as strings; coerce before every request
   // body so the backend's Pydantic int/float fields don't have to guess.
   const NUMERIC_FIELDS = ["port", "epochs", "train_pct", "valid_pct", "test_pct"];
-  // "auto": merge runs continue from the deployed model, the first run starts from a YOLO model.
+  // "auto": the newest model found by the server scan, else a fresh YOLO model.
+  const latestModelPath = (models) => (models?.length
+    ? models.reduce((a, b) => (b.mtime > a.mtime ? b : a)).path : null);
   const modelChoice = fields.model_choice !== "auto" ? fields.model_choice
-    : (pipelineData?.runs?.find((r) => r.id === selectedRunId)?.run_type === "merge" ? "production" : "yolo");
+    : (latestModelPath(remoteInfo?.models) || "yolo");
+  // After a scan: keep the user's pick if that model is still there, otherwise select the newest one.
+  const pickModelAfterScan = (f, models) => {
+    const latest = latestModelPath(models);
+    if (!latest || models.some((m) => m.path === f.model_choice)) return f;
+    return { ...f, model_choice: latest };
+  };
   const buildBody = () => {
     const body = { ...fields };
     for (const key of NUMERIC_FIELDS) if (body[key] !== "") body[key] = Number(body[key]);
@@ -187,8 +195,7 @@ export default function DeployPipeline({ pid, project }) {
       body.update_class_names = mergeFlags.update_class_names;
     }
     body.hyperparams = hyper;
-    body.start_from_path = modelChoice === "production" ? body.remote_production_model_path
-      : modelChoice !== "yolo" ? modelChoice : "";
+    body.start_from_path = modelChoice !== "yolo" ? modelChoice : "";
     body.yolo_model = modelChoice === "yolo" ? body.yolo_model : "";
     return body;
   };
@@ -347,7 +354,7 @@ export default function DeployPipeline({ pid, project }) {
       const { data } = await api.post(`/pipeline/runs/${rid}/inspect_remote`, buildBody());
       setRemoteInfo(data);
       setFields((f) => ({
-        ...f,
+        ...pickModelAfterScan(f, data.models),
         remote_workdir: data.workdir || f.remote_workdir,
         existing_data_yaml_path: data.found
           ? (data.datasets.some((d) => d.data_yaml_path === f.existing_data_yaml_path)
@@ -369,6 +376,7 @@ export default function DeployPipeline({ pid, project }) {
     try {
       const { data } = await api.post(`/pipeline/runs/${rid}/inspect_remote`, buildBody());
       setRemoteInfo(data);
+      setFields((f) => pickModelAfterScan(f, data.models));
       toast.success(`${data.models?.length || 0} model(s) found on the server`);
     } catch (e) {
       toast.error(e.response?.data?.detail || "Could not scan remote host");
@@ -407,6 +415,7 @@ export default function DeployPipeline({ pid, project }) {
       try {
         const { data } = await api.post(`/pipeline/runs/${rid}/inspect_remote`, buildBody());
         setRemoteInfo(data);
+        setFields((f) => pickModelAfterScan(f, data.models));
         if (data.found) {
           setFields((f) => ({ ...f, existing_data_yaml_path: data.datasets[0].data_yaml_path, dataset_mode: "merge" }));
           toast.info("Existing dataset found on the server — choose how to use it, then press Upload again");
@@ -735,22 +744,12 @@ export default function DeployPipeline({ pid, project }) {
                 >
                   Scan server for existing models
                 </Button>
-                <label className="flex items-start gap-2 text-xs cursor-pointer">
-                  <input
-                    type="radio" name="model_choice" className="accent-primary mt-0.5"
-                    checked={modelChoice === "production"}
-                    onChange={() => setFields((f) => ({ ...f, model_choice: "production" }))}
-                  />
-                  <span>
-                    Continue from the deployed model
-                    <code className="block text-primary break-all">
-                      {fields.remote_production_model_path || `${(fields.remote_workdir || "<workdir>").replace(/\/+$/, "")}/models/production.pt`}
-                    </code>
-                  </span>
-                </label>
+                {!remoteInfo && (
+                  <div className="text-xs text-muted-foreground">Scan to pick the newest model on the server.</div>
+                )}
                 {remoteInfo?.models?.length > 0 && (
                   <div className="space-y-2" data-testid={T.modelChoiceRadio}>
-                    <div className="text-[10px] text-muted-foreground">Continue training from a model already on the server:</div>
+                    <div className="text-[10px] text-muted-foreground">Continue training from a model on the server (newest is pre-selected):</div>
                     {remoteInfo.models.map((m) => (
                       <label key={m.path} className="flex items-start gap-2 text-xs cursor-pointer">
                         <input
@@ -760,6 +759,9 @@ export default function DeployPipeline({ pid, project }) {
                         />
                         <span>
                           <code className="text-primary break-all">{m.path}</code>
+                          {m.path === latestModelPath(remoteInfo.models) && (
+                            <span className="ml-2 text-[10px] uppercase tracking-[0.2em] text-primary">latest</span>
+                          )}
                           <span className="block text-muted-foreground">
                             {(m.size / 1048576).toFixed(1)} MB · {new Date(m.mtime * 1000).toLocaleString()}
                           </span>
