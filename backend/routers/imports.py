@@ -408,17 +408,19 @@ def register(s):
     @router.delete("/imports/{bid}/images")
     async def rollback_import(bid: str, current=Depends(get_current_user)):
         """Remove the batch's images that nobody has touched since import. Anything annotated, reopened, assigned or
-        rejected is kept. Stored image objects are not deleted (same as deleting an image)."""
+        rejected is kept. Their stored files are deleted too."""
         b = await _owned_batch(bid, current["id"])
         if b["status"] in ("scanning", "committing", "staging"):
             raise HTTPException(status_code=409, detail="Wait for the import to finish or cancel it first")
         q = {"project_id": b["project_id"], "provenance.import_batch_id": bid, "annotated_by": {"$exists": False},
              "assigned_to": None, "review_status": {"$in": ["unassigned", "submitted", "approved"]}}
-        ids = [d["id"] for d in await db.images.find(q, {"_id": 0, "id": 1}).to_list(None)]
+        docs = await db.images.find(q, {"_id": 0, "id": 1, "storage_path": 1}).to_list(None)
+        ids = [d["id"] for d in docs]
         total = await db.images.count_documents({"project_id": b["project_id"], "provenance.import_batch_id": bid})
         if ids:
             await db.images.delete_many({"id": {"$in": ids}})
             await db.import_items.update_many({"batch_id": bid, "image_id": {"$in": ids}}, {"$set": {"status": "rolled_back"}})
+            await s.purge_files([d.get("storage_path") for d in docs], {"images": "storage_path"})
         await s._log_activity(b["project_id"], current["id"], "import_rolled_back", {"batch_id": bid, "deleted": len(ids), "kept": total - len(ids)})
         return {"deleted": len(ids), "kept": total - len(ids)}
 

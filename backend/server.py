@@ -11,6 +11,7 @@ import math
 import asyncio
 import tempfile
 import mimetypes
+import shutil
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Any
@@ -208,6 +209,44 @@ def put_object(path: str, data: bytes, content_type: str) -> dict:
             os.unlink(tmp)
         raise
     return {"path": path, "size": len(data)}
+
+def delete_object(path: str) -> bool:
+    """Remove one stored file. Missing files are fine; returns True if something was deleted."""
+    try:
+        _safe_path(path).unlink()
+        return True
+    except FileNotFoundError:
+        return False
+
+def delete_prefix(prefix: str) -> bool:
+    """Remove a whole stored folder (e.g. a project's). Never removes STORAGE_DIR itself."""
+    full = _safe_path(prefix)
+    if full == Path(STORAGE_DIR).resolve() or not full.is_dir():
+        return False
+    shutil.rmtree(full, ignore_errors=True)
+    return True
+
+async def purge_files(paths, still_used_by: Optional[dict] = None):
+    """Delete stored files after their DB records are gone. Failures are logged, never raised, so a
+    storage hiccup can't fail the API call. `still_used_by` ({collection: field}) keeps files another
+    record still points at."""
+    paths = {x for x in paths if x}
+    if not paths:
+        return
+    for coll, field in (still_used_by or {}).items():
+        paths -= set(await db[coll].distinct(field, {field: {"$in": list(paths)}}))
+    for x in paths:
+        try:
+            await asyncio.to_thread(delete_object, x)
+        except Exception as e:
+            logger.warning(f"Could not delete stored file {x}: {e}")
+
+async def purge_project_files(pid: str):
+    try:
+        await asyncio.to_thread(delete_prefix, f"{APP_NAME}/projects/{pid}")
+    except Exception as e:
+        logger.warning(f"Could not delete stored files for project {pid}: {e}")
+
 
 def get_object(path: str):
     full = _safe_path(path)
@@ -850,6 +889,7 @@ async def delete_video(vid: str, current=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Not found")
     await _project_access_check(v["project_id"], current["id"], roles=["owner", "admin"])
     await db.videos.delete_one({"id": vid})
+    await purge_files([v.get("storage_path")])
     return {"ok": True}
 
 

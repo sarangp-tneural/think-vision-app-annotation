@@ -48,3 +48,24 @@ def test_rejects_unsafe_paths(storage, bad):
 def test_missing_file_raises(storage):
     with pytest.raises(FileNotFoundError):
         server.get_object("nope/missing.jpg")
+
+
+def test_delete_object_and_prefix(storage):
+    server.put_object("app/projects/p1/a.jpg", b"a", "image/jpeg")
+    server.put_object("app/projects/p1/videos/v.mp4", b"v", "video/mp4")
+    server.put_object("app/projects/p2/b.jpg", b"b", "image/jpeg")
+    assert server.delete_object("app/projects/p1/a.jpg") is True
+    assert server.delete_object("app/projects/p1/a.jpg") is False  # already gone
+    assert server.delete_prefix("app/projects/p1") is True
+    assert not (storage / "app/projects/p1").exists()
+    assert (storage / "app/projects/p2/b.jpg").exists()  # other projects untouched
+
+
+def test_delete_prefix_never_removes_storage_root(storage):
+    server.put_object("keep/x.jpg", b"x", "image/jpeg")
+    for bad in ("", ".", "keep/.."):
+        try:
+            assert server.delete_prefix(bad) is False
+        except ValueError:
+            pass
+    assert (storage / "keep/x.jpg").exists()

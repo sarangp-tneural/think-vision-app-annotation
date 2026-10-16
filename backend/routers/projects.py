@@ -93,6 +93,7 @@ def register(s):
         await db.images.delete_many({"project_id": pid})
         await db.versions.delete_many({"project_id": pid})
         await db.models.delete_many({"project_id": pid})
+        await s.purge_project_files(pid)  # image / video / weights files under the project's folder
         return {"ok": True}
 
     @router.post("/projects/{pid}/classes")

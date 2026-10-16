@@ -133,6 +133,7 @@ def register(s):
         await db.models.delete_one({"id": mid})
         # Drop the in-memory copy too so a deleted model can't keep predicting.
         s._yolo_cache.pop(m.get("weights_path"), None)
+        await s.purge_files([m.get("weights_path")], {"models": "weights_path"})
         await s._log_activity(m["project_id"], current["id"], "model_deleted", {"model_id": mid})
         return {"ok": True}
 

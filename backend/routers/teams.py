@@ -83,6 +83,7 @@ def register(s):
             await db.images.delete_many({"project_id": p["id"]})
             await db.versions.delete_many({"project_id": p["id"]})
             await db.models.delete_many({"project_id": p["id"]})
+            await s.purge_project_files(p["id"])
         await db.projects.delete_many({"team_id": tid})
         await db.team_members.delete_many({"team_id": tid})
         await db.teams.delete_one({"id": tid})

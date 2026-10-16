@@ -385,12 +385,14 @@ def register(s):
 
     async def _delete_images(pid: str, ids: list, include_approved: bool, actor_id: str) -> dict:
         """Delete images of one project (and their comments); approved ones only when asked for."""
-        found = await db.images.find({"id": {"$in": ids}, "project_id": pid}, {"id": 1, "review_status": 1}).to_list(len(ids) or 1)
+        found = await db.images.find({"id": {"$in": ids}, "project_id": pid}, {"id": 1, "review_status": 1, "storage_path": 1}).to_list(len(ids) or 1)
         approved = [i["id"] for i in found if i.get("review_status") == "approved"]
         doomed = [i["id"] for i in found if include_approved or i["id"] not in set(approved)]
         if doomed:
             await db.images.delete_many({"id": {"$in": doomed}})
             await db.comments.delete_many({"image_id": {"$in": doomed}})
+            doomed_set = set(doomed)
+            await s.purge_files([i.get("storage_path") for i in found if i["id"] in doomed_set], {"images": "storage_path"})
             await s._log_activity(pid, actor_id, "images_deleted", {"count": len(doomed)})
         return {"deleted": len(doomed), "skipped_approved": 0 if include_approved else len(approved)}
 
