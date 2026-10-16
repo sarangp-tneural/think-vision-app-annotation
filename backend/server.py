@@ -110,6 +110,77 @@ async def send_invite_email(to_email: str, team_name: str, inviter_name: str, ro
         return {"sent": False, "error": str(e)[:200]}
 
 
+async def send_assignment_email(to_email: str, to_name: str, project_name: str, project_id: str,
+                                count: int, kind: str, assigner_name: str, due_date=None):
+    """Tell a member they were assigned images to annotate or review. Never raises."""
+    if not RESEND_API_KEY:
+        logger.warning("RESEND_API_KEY not set; skipping assignment email")
+        return {"skipped": True, "reason": "no_api_key"}
+    from html import escape
+    verb = "review" if kind == "review" else "annotate"
+    noun = f"{count} image{'s' if count != 1 else ''}"
+    link = f"{APP_URL}/projects/{project_id}" if APP_URL else ""
+    subject = f"You've been assigned {noun} to {verb} in {project_name}"
+    due = f'<p style="font-size:14px; color:#c4c4c8; margin:0 0 16px;">Due: <strong style="color:#f5f5f7;">{escape(str(due_date))}</strong></p>' if due_date else ""
+    button = f"""
+        <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+          <td style="border-radius:8px; background:#06B6D4;">
+            <a href="{link}" style="display:inline-block; padding:12px 24px; font-size:14px; font-weight:600; color:#050505; text-decoration:none; letter-spacing:0.05em;">Open project</a>
+          </td>
+        </tr></table>""" if link else ""
+    body = f"""
+<!DOCTYPE html>
+<html>
+<body style="font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#f5f5f7; margin:0; padding:24px;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px; margin:0 auto; background:#0a0a0a; color:#f5f5f7; border-radius:12px; overflow:hidden;">
+    <tr>
+      <td style="padding:32px; border-bottom:1px solid #27272A;">
+        <div style="font-size:11px; letter-spacing:0.3em; color:#06B6D4; text-transform:uppercase;">{escape(BRAND_NAME)}</div>
+        <h1 style="font-size:24px; margin:12px 0 0; color:#f5f5f7;">You have new images to <span style="color:#06B6D4;">{verb}</span></h1>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:28px 32px;">
+        <p style="font-size:15px; line-height:1.6; color:#c4c4c8; margin:0 0 16px;">
+          Hi {escape(to_name or 'there')}, <strong style="color:#f5f5f7;">{escape(assigner_name)}</strong> assigned <strong style="color:#06B6D4;">{noun}</strong> to you to {verb} in <strong style="color:#f5f5f7;">{escape(project_name)}</strong>.
+        </p>
+        {due}
+        {button}
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:20px 32px; background:#050505; font-size:11px; color:#71717a; text-align:center;">
+        {escape(BRAND_NAME)} · Computer vision datasets, annotation & training
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+""".strip()
+    params = {"from": SENDER_EMAIL, "to": [to_email], "subject": subject, "html": body}
+    try:
+        result = await asyncio.to_thread(resend.Emails.send, params)
+        logger.info(f"Assignment email sent to {to_email}: {result.get('id')}")
+        return {"sent": True, "email_id": result.get("id")}
+    except Exception as e:
+        logger.error(f"Failed to send assignment email to {to_email}: {e}")
+        return {"sent": False, "error": str(e)[:200]}
+
+
+async def email_assignee(user_id: str, project: dict, count: int, kind: str, assigner: dict, due_date=None):
+    """Look up the assignee and email them; skips self-assignments and missing users. Never raises."""
+    try:
+        if not user_id or not count or user_id == assigner["id"]:
+            return
+        u = await db.users.find_one({"id": user_id}, {"_id": 0, "email": 1, "name": 1})
+        if not u or not u.get("email"):
+            return
+        await send_assignment_email(u["email"], u.get("name", ""), project["name"], project["id"],
+                                    count, kind, assigner.get("name", "A teammate"), due_date)
+    except Exception as e:
+        logger.error(f"email_assignee failed for {user_id}: {e}")
+
+
 def send_tester_notification_email(to_emails: list, project_name: str, project_id: str,
                                     run_id: str, app_url: str) -> dict:
     """Send a deploy-pipeline testing-ready notification via Resend. Cloned
@@ -1055,7 +1126,7 @@ async def list_project_assignments(pid: str, current=Depends(get_current_user)):
 
 # ----------------- Bulk Assign / Task Metadata ----------------- #
 @api_router.post("/projects/{pid}/images/bulk-assign")
-async def bulk_assign_images(pid: str, payload: BulkAssignIn, current=Depends(get_current_user)):
+async def bulk_assign_images(pid: str, payload: BulkAssignIn, background: BackgroundTasks, current=Depends(get_current_user)):
     p = await _project_access_check(pid, current["id"], roles=["owner", "admin"])
     tid = p.get("team_id")
     if payload.user_id and tid:
@@ -1081,6 +1152,7 @@ async def bulk_assign_images(pid: str, payload: BulkAssignIn, current=Depends(ge
     await _log_activity(pid, current["id"], "bulk_assigned", {"count": result.modified_count, "user_id": payload.user_id})
     if payload.user_id:
         await _notify(payload.user_id, "image_assigned", f"{result.modified_count} image(s) assigned to you in '{p['name']}'", project_id=pid)
+        background.add_task(email_assignee, payload.user_id, p, result.modified_count, "annotate", current, payload.due_date)
     return {"updated": result.modified_count}
 
 
@@ -1096,7 +1168,7 @@ def _split_evenly(items: list, k: int) -> list:
 
 
 @api_router.post("/projects/{pid}/images/bulk-assign-split")
-async def bulk_assign_split(pid: str, payload: BulkSplitAssignIn, current=Depends(get_current_user)):
+async def bulk_assign_split(pid: str, payload: BulkSplitAssignIn, background: BackgroundTasks, current=Depends(get_current_user)):
     """Divide the images evenly between the chosen members, in the given order:
     10 images / 3 members -> 4/3/3, each member gets one consecutive block."""
     p = await _project_access_check(pid, current["id"], roles=["owner", "admin"])
@@ -1130,13 +1202,14 @@ async def bulk_assign_split(pid: str, payload: BulkSplitAssignIn, current=Depend
         assignments.append({"user_id": uid, "count": res.modified_count})
         if uid != current["id"] and res.modified_count:
             await _notify(uid, "image_assigned", f"{res.modified_count} image(s) assigned to you in '{p['name']}'", project_id=pid)
+            background.add_task(email_assignee, uid, p, res.modified_count, "annotate", current, payload.due_date)
     total = sum(a["count"] for a in assignments)
     await _log_activity(pid, current["id"], "bulk_assigned", {"count": total, "user_ids": user_ids, "split": True})
     return {"updated": total, "skipped_locked": len(ordered) - len(open_ids), "assignments": assignments}
 
 
 @api_router.post("/projects/{pid}/images/bulk-assign-review")
-async def bulk_assign_review(pid: str, payload: BulkAssignReviewIn, current=Depends(get_current_user)):
+async def bulk_assign_review(pid: str, payload: BulkAssignReviewIn, background: BackgroundTasks, current=Depends(get_current_user)):
     """Choose who reviews the images (one reviewer, or an even split in the given order). Once an image has a
     reviewer only they and owners/admins can review it; images without one stay in the shared pool."""
     p = await _project_access_check(pid, current["id"], roles=["owner", "admin"])
@@ -1164,6 +1237,7 @@ async def bulk_assign_review(pid: str, payload: BulkAssignReviewIn, current=Depe
             assignments.append({"user_id": uid, "count": res.modified_count})
             if uid != current["id"] and res.modified_count:
                 await _notify(uid, "review_assigned", f"{res.modified_count} image(s) assigned to you for review in '{p['name']}'", project_id=pid)
+                background.add_task(email_assignee, uid, p, res.modified_count, "review", current)
         total = sum(a["count"] for a in assignments)
     await _log_activity(pid, current["id"], "bulk_review_assigned", {"count": total, "user_ids": user_ids})
     return {"updated": total, "skipped_approved": len(ordered) - len(open_ids), "assignments": assignments}

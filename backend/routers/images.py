@@ -161,7 +161,7 @@ def register(s):
         return {"id": hit["id"] if hit else None}
 
     @router.post("/images/{img_id}/assign")
-    async def assign_image(img_id: str, payload: s.AssignImageIn, current=Depends(get_current_user)):
+    async def assign_image(img_id: str, payload: s.AssignImageIn, background: BackgroundTasks, current=Depends(get_current_user)):
         img = await db.images.find_one({"id": img_id})
         if not img:
             raise HTTPException(status_code=404, detail="Not found")
@@ -180,6 +180,7 @@ def register(s):
         await s._log_activity(img["project_id"], current["id"], "image_assigned" if target else "image_unassigned", {"image_id": img_id, "user_id": target})
         if target and target != current["id"]:
             await s._notify(target, "image_assigned", "An image was assigned to you", project_id=img["project_id"], image_id=img_id)
+            background.add_task(s.email_assignee, target, project, 1, "annotate", current, img.get("due_date"))
         return {"ok": True, **update}
 
     async def _after_submit(img: dict, actor_id: str):
