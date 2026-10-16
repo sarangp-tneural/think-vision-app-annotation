@@ -327,6 +327,8 @@ def register(s):
         await s._image_view_check(img, current["id"])
         try:
             data, ct = await asyncio.to_thread(s.get_object, path)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="File not found in storage")
         except Exception as e:
             logger.error(f"Fetch failed: {e}")
             raise HTTPException(status_code=500, detail="File fetch failed")

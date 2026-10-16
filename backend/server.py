@@ -10,6 +10,7 @@ import random
 import math
 import asyncio
 import tempfile
+import mimetypes
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Any
@@ -49,7 +50,7 @@ APP_URL = os.environ.get("APP_URL", "")
 if RESEND_API_KEY:
     resend.api_key = RESEND_API_KEY
 
-STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
+STORAGE_DIR = os.environ.get("STORAGE_DIR", "/var/lib/thinkvision/storage")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -176,37 +177,44 @@ app = FastAPI(title="VisionForge API")
 api_router = APIRouter(prefix="/api")
 
 # ----------------- Storage ----------------- #
-storage_key: Optional[str] = None
+# Files (images, videos, model weights) live on this server's disk under STORAGE_DIR.
+# `path` is the DB-stored storage_path, e.g. "<APP_NAME>/projects/<pid>/<img_id>.jpg".
+def _safe_path(path: str) -> Path:
+    """Resolve a storage path under STORAGE_DIR; reject anything that would escape it."""
+    base = Path(STORAGE_DIR).resolve()
+    if not path or os.path.isabs(path) or "\x00" in path:
+        raise ValueError(f"Invalid storage path: {path!r}")
+    full = (base / path).resolve()
+    if base != full and base not in full.parents:
+        raise ValueError(f"Invalid storage path: {path!r}")
+    return full
 
 def init_storage() -> str:
-    global storage_key
-    if storage_key:
-        return storage_key
-    resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_LLM_KEY}, timeout=30)
-    resp.raise_for_status()
-    storage_key = resp.json()["storage_key"]
-    return storage_key
+    os.makedirs(STORAGE_DIR, exist_ok=True)
+    if not os.access(STORAGE_DIR, os.W_OK):
+        raise PermissionError(f"STORAGE_DIR is not writable: {STORAGE_DIR}")
+    return STORAGE_DIR
 
 def put_object(path: str, data: bytes, content_type: str) -> dict:
-    key = init_storage()
-    resp = requests.put(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key, "Content-Type": content_type},
-        data=data,
-        timeout=120,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    full = _safe_path(path)
+    full.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=full.parent, prefix=".tmp_")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, full)  # atomic: readers never see a half-written file
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return {"path": path, "size": len(data)}
 
 def get_object(path: str):
-    key = init_storage()
-    resp = requests.get(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+    full = _safe_path(path)
+    data = full.read_bytes()  # FileNotFoundError if missing
+    # the system MIME table maps ".pt" to an unrelated type, so model weights are pinned
+    ct = "application/octet-stream" if full.suffix == ".pt" else (mimetypes.guess_type(str(full))[0] or "application/octet-stream")
+    return data, ct
 
 
 # ----------------- Models ----------------- #
