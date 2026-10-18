@@ -1,12 +1,15 @@
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { LogOut, LayoutGrid, User as UserIcon, Users, ClipboardList } from "lucide-react";
-import { clearAuth, getUser } from "@/lib/api";
+import { LogOut, LayoutGrid, Users, ClipboardList } from "lucide-react";
+import { clearAuth } from "@/lib/api";
 import NotificationsBell from "@/components/NotificationsBell";
+import UserAvatar from "@/components/UserAvatar";
+import useCurrentUser from "@/hooks/useCurrentUser";
+import { PROFILE } from "@/constants/testIds";
 
 export default function Navbar({ crumbs }) {
   const navigate = useNavigate();
-  const user = getUser();
+  const user = useCurrentUser();
 
   const logout = () => {
     clearAuth();
@@ -51,10 +54,10 @@ export default function Navbar({ crumbs }) {
           </Link>
           <NotificationsBell />
           {user && (
-            <div className="hidden md:flex items-center gap-2 text-xs text-muted-foreground border-l border-[#27272A] pl-3" data-testid="navbar-user">
-              <UserIcon className="w-4 h-4" />
-              <span>{user.name}</span>
-            </div>
+            <Link to="/profile" className="hidden md:flex items-center gap-2 text-xs text-muted-foreground hover:text-primary transition-colors border-l border-[#27272A] pl-3" data-testid={PROFILE.navbarLink}>
+              <UserAvatar user={user} className="h-6 w-6" />
+              <span data-testid="navbar-user">{user.name}</span>
+            </Link>
           )}
           <Button
             variant="ghost"

@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { LayoutDashboard, Users, FolderKanban, ClipboardList, LogOut, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, clearAuth, getUser } from "@/lib/api";
 import { toast } from "sonner";
-import { MANAGER } from "@/constants/testIds";
+import { MANAGER, PROFILE } from "@/constants/testIds";
 
 const NAV = [
   { key: "overview", to: "/manager", label: "Overview", icon: LayoutDashboard, end: true },
@@ -56,7 +56,7 @@ export default function ManagerLayout() {
             ))}
           </nav>
           <div className="flex items-center gap-3 text-xs text-muted-foreground">
-            <span className="hidden md:inline">{user?.name}</span>
+            <Link to="/profile" className="hidden md:inline hover:text-primary transition-colors" data-testid={PROFILE.navbarLink}>{user?.name}</Link>
             <Button variant="ghost" size="sm" onClick={logout} className="rounded-sm h-8 text-xs uppercase tracking-[0.2em] hover:bg-[#1C1C1C] hover:text-primary" data-testid={MANAGER.logout}>
               <LogOut className="w-4 h-4 mr-2" /> Exit
             </Button>

@@ -14,6 +14,7 @@ import TeamDetail from "@/pages/TeamDetail";
 import TeamDashboard from "@/pages/TeamDashboard";
 import Activity from "@/pages/Activity";
 import MyWorkLog from "@/pages/MyWorkLog";
+import Profile from "@/pages/Profile";
 import ManagerLayout from "@/pages/manager/ManagerLayout";
 import ManagerOverview from "@/pages/manager/Overview";
 import ManagerPeople from "@/pages/manager/People";
@@ -44,6 +45,7 @@ function App() {
           <Route path="/auth" element={<Auth />} />
           <Route path="/dashboard" element={<Protected><Dashboard /></Protected>} />
           <Route path="/work-log" element={<Protected><MyWorkLog /></Protected>} />
+          <Route path="/profile" element={<Protected><Profile /></Protected>} />
           <Route path="/manager" element={<ManagerProtected><ManagerLayout /></ManagerProtected>}>
             <Route index element={<ManagerOverview />} />
             <Route path="people" element={<ManagerPeople />} />

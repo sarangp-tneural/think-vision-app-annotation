@@ -394,7 +394,8 @@ def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
 def create_token(user_id: str) -> str:
-    payload = {"sub": user_id, "exp": datetime.now(timezone.utc) + timedelta(days=7)}
+    now = datetime.now(timezone.utc)
+    payload = {"sub": user_id, "iat": int(now.timestamp()), "exp": now + timedelta(days=7)}
     return pyjwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 async def get_current_user(authorization: Optional[str] = Header(None), auth: Optional[str] = Query(None)):
@@ -413,6 +414,9 @@ async def get_current_user(authorization: Optional[str] = Header(None), auth: Op
     user = await db.users.find_one({"id": user_id})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    # A password change signs out every session whose token was issued before it.
+    if payload.get("iat", 0) < user.get("password_changed_at", 0):
+        raise HTTPException(status_code=401, detail="Session expired, please log in again")
     # Auto-activate any pending invites so re-invites work without re-login
     try:
         await _activate_pending_invites(user["id"], user["email"])
@@ -2215,6 +2219,7 @@ from routers import deployment as _deployment_router
 from routers import work_logs as _work_logs_router
 from routers import manager as _manager_router
 from routers import imports as _imports_router
+from routers import profile as _profile_router
 _training_router.register(_this_module)
 _al_router.register(_this_module)
 _auth_router.register(_this_module)
@@ -2226,6 +2231,7 @@ _deployment_router.register(_this_module)
 _work_logs_router.register(_this_module)
 _manager_router.register(_this_module)
 _imports_router.register(_this_module)
+_profile_router.register(_this_module)
 api_router.include_router(_training_router.router)
 api_router.include_router(_al_router.router)
 api_router.include_router(_auth_router.router)
@@ -2237,6 +2243,7 @@ api_router.include_router(_deployment_router.router)
 api_router.include_router(_work_logs_router.router)
 api_router.include_router(_manager_router.router)
 api_router.include_router(_imports_router.router)
+api_router.include_router(_profile_router.router)
 
 app.include_router(api_router)
 

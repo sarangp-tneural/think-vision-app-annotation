@@ -20,3 +20,4 @@ export * from './imports';
 export * from './duplicates';
 export * from './datasetBulk';
 export * from './remoteTraining';
+export * from './profile';

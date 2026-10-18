@@ -42,7 +42,7 @@ def register(s):
             raise HTTPException(status_code=400, detail="Invalid credentials")
         await s._ensure_personal_team(user["id"], user["name"])
         await s._activate_pending_invites(user["id"], user["email"])
-        return {"token": s.create_token(user["id"]), "user": {"id": user["id"], "email": user["email"], "name": user["name"], "role": user.get("role", "user")}}
+        return {"token": s.create_token(user["id"]), "user": {"id": user["id"], "email": user["email"], "name": user["name"], "role": user.get("role", "user"), "avatar_path": user.get("avatar_path")}}
 
     @router.post("/auth/manager-login")
     async def auth_manager_login(payload: s.ManagerLogin):
@@ -56,4 +56,4 @@ def register(s):
 
     @router.get("/auth/me")
     async def auth_me(current=Depends(get_current_user)):
-        return {"id": current["id"], "email": current["email"], "name": current["name"], "role": current.get("role", "user")}
+        return {"id": current["id"], "email": current["email"], "name": current["name"], "role": current.get("role", "user"), "avatar_path": current.get("avatar_path")}
