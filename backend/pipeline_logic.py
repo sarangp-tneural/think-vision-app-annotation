@@ -299,13 +299,29 @@ def render_train_eval_script(params: dict) -> str:
     metrics_json_path = params["metrics_json_path"]
     best_pt_path = f'{params["project_dir"]}/{params["run_name"]}/weights/best.pt'
 
+    # A custom checkpoint (a path, not a stock name like yolov8n.pt) already has class meanings baked into its head.
+    # Ultralytics keeps that head when the class count matches, so a different order would silently train it wrong.
+    names_check = ""
+    if "/" in checkpoint_path:
+        names_check = f'''
+import yaml
+_ckpt_names = [model.names[i] for i in sorted(model.names)]
+with open({data_yaml_path!r}) as _f:
+    _n = (yaml.safe_load(_f) or {{}}).get("names") or []
+_data_names = [_n[i] for i in sorted(_n)] if isinstance(_n, dict) else list(_n)
+print("checkpoint classes:", _ckpt_names)
+print("dataset classes:   ", _data_names)
+if len(_ckpt_names) == len(_data_names) and _ckpt_names != _data_names:
+    raise SystemExit("class order mismatch: the starting model and data.yaml list the same number of classes in a different order/naming. Pick another starting model or fix the class order.")
+'''
+
     return f'''\
 import json
 from pathlib import Path
 from ultralytics import YOLO
 
 model = YOLO({checkpoint_path!r})
-model.train(
+{names_check}model.train(
     {train_kwargs_src},
 )
 

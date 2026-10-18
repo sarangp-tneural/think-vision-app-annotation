@@ -256,3 +256,14 @@ def test_validate_dataset_dir_understands_segmentation_and_obb_label_files(tmp_p
     assert pl.validate_dataset_dir(root, nc=2, label_format="obb") == [] and pl.validate_dataset_dir(root, nc=2, label_format="seg") == []
     label.write_text("5 0.1 0.1 0.5 0.1 0.5 0.5 0.1 0.5\n")
     assert any("out of range" in e for e in pl.validate_dataset_dir(root, nc=2, label_format="obb"))
+
+
+def test_render_script_checks_class_order_only_for_custom_checkpoints():
+    base = {"data_yaml_path": "/w/dataset/data.yaml", "epochs": 1, "project_dir": "/w/runs",
+            "run_name": "r", "metrics_json_path": "/w/m.json"}
+    custom = pl.render_train_eval_script({**base, "checkpoint_path": "/w/models/prod.pt"})
+    stock = pl.render_train_eval_script({**base, "checkpoint_path": "yolov8n.pt"})
+    compile(custom, "custom", "exec")
+    compile(stock, "stock", "exec")
+    assert "class order mismatch" in custom
+    assert "class order mismatch" not in stock

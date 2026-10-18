@@ -538,6 +538,8 @@ def test_preview_then_execute_through_the_api(client, db, world, env):
     summary = run_doc["dataset_export"]["merge_summary"]
     assert summary["added"] == 1 and summary["labels_updated"] == 1
     assert run_doc["dataset_export"]["dataset_mode"] == "merge" and run_doc["dataset_export"]["test_count"] >= 2
+    # the model is trained in the server yaml's class order, so that is what gets stored for inference
+    assert run_doc["dataset_export"]["classes"][:3] == yaml.safe_load(env.server.files[f"{ROOT}/data.yaml"])["names"][:3]
     assert env.server.files[f"{ROOT}/train/labels/a.txt"] == b"0 0.250000 0.250000 0.300000 0.300000\n"
     assert db.merge_plans.find_one({"id": plan["id"]})["status"] == "executed"
     no_secrets(db)

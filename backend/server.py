@@ -2005,6 +2005,11 @@ def _yolo_predict_sync(weights_path: str, image_bytes: bytes, classes: List[str]
     r = res[0]
     if r.boxes is None or len(r.boxes) == 0:
         return boxes
+    # The weights know their own index -> name map. Use it when the stored class list is missing or doesn't
+    # describe these weights (a different length), instead of mislabelling every box as "object".
+    weight_names = getattr(r, "names", None) or {}
+    if weight_names and len(classes) != len(weight_names):
+        classes = [str(weight_names[i]) if i in weight_names else "object" for i in range(max(weight_names) + 1)]
     for b in r.boxes:
         try:
             xyxy = b.xyxy[0].tolist()

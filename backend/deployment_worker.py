@@ -278,6 +278,9 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
                 {"id": _run_doc["pipeline_id"]}, {"$set": {"remote_workdir": req["remote_workdir"]}}
             )
         dataset_mode = req.get("dataset_mode", "new")
+        # The class order the model is trained with (index -> name). A server dataset (merge / reuse) has its own
+        # order, which inference must decode with; only a fresh upload follows the project's list.
+        training_classes = classes
         report = _make_progress_reporter(sync_db, run_id)
         report("preparing", 0, 1)
         connect_args = (req["host"], req["port"], req["username"],
@@ -335,6 +338,7 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
                     merge_summary = stats
                     # classes may have been appended and the yaml's `path:` may be stale: use a fresh copy of it
                     yaml_cfg = yaml.safe_load(_read_remote_text(client, plan["remote"]["data_yaml_path"])) or {}
+                    training_classes = pipeline_logic.names_as_list(yaml_cfg) or classes
                     data_yaml_path = _ensure_usable_yaml(client, yaml_cfg, plan["remote"]["data_yaml_path"], yaml_dir, path_exists)
                     test_ids = [i["id"] for i in sync_db.images.find(
                         {"project_id": project_id, "annotated": True, "review_status": "approved", "split": "test"},
@@ -344,6 +348,7 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
                                   "test_count": split_counts.get("test", 0), "test_image_ids": test_ids}
                 else:  # reuse: nothing uploaded
                     remote_names = pipeline_logic.names_as_list(yaml_cfg)
+                    training_classes = remote_names or classes
                     missing = [c for c in classes if c not in remote_names]
                     if missing:
                         raise Exception(
@@ -382,7 +387,7 @@ def _pipeline_uploading_data_sync(run_id: str, project_id: str, history_index: i
                     "remote_upload_path": remote_upload_path,
                     "data_yaml_path": data_yaml_path,
                     "dataset_mode": dataset_mode,
-                    "classes": classes,
+                    "classes": training_classes,
                     **({"merge_summary": merge_summary} if dataset_mode == "merge" else {}),
                 },
                 f"stage_history.{history_index}.status": "succeeded",
