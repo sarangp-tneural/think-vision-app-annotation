@@ -340,7 +340,11 @@ export default function ModelDeploy() {
                     min="0"
                     max="200"
                     value={realEpochs}
-                    onChange={(e) => setRealEpochs(Math.max(0, Number(e.target.value) || 0))}
+                    onChange={(e) => {
+                      const n = Math.max(0, Number(e.target.value) || 0);
+                      e.target.value = String(n);
+                      setRealEpochs(n);
+                    }}
                     className="rounded-sm bg-transparent border-[#27272A] focus-visible:ring-primary"
                     data-testid="real-epochs-input"
                   />
@@ -578,7 +582,7 @@ export default function ModelDeploy() {
                 min="1"
                 max="200"
                 value={epochs}
-                onChange={(e) => setEpochs(e.target.value)}
+                onChange={(e) => setEpochs(e.target.value.replace(/^0+(?=\d)/, ""))}
                 className="rounded-sm bg-transparent border-[#27272A] focus-visible:ring-primary"
                 data-testid="train-epochs-input"
               />
