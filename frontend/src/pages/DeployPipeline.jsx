@@ -1200,14 +1200,26 @@ export default function DeployPipeline({ pid, project }) {
                 title={locked ? "Complete the previous step first" : step.label}
                 onClick={() => setViewStep(i === st.currentIdx ? null : i)}
                 className={`flex items-center gap-2 px-3 py-2 text-[10px] uppercase tracking-[0.2em] border-b-2 transition-colors ${color} ${
-                  active === i && !locked ? "border-current bg-[#121212]" : "border-transparent"
+                  active === i && !locked
+                    ? "border-current bg-[#1C1C1C] ring-1 ring-primary/60 font-bold"
+                    : "border-transparent"
                 } ${locked ? "cursor-not-allowed" : "hover:bg-[#1C1C1C]"}`}
                 data-testid={`${T.stepTab}-${step.key}`}
               >
-                <span className="w-5 h-5 rounded-full border border-current flex items-center justify-center text-[9px] font-bold">
+                <span
+                  className={`w-5 h-5 rounded-full border border-current flex items-center justify-center text-[9px] font-bold ${
+                    active === i && !locked ? "ring-2 ring-primary ring-offset-2 ring-offset-[#1C1C1C]" : ""
+                  }`}
+                >
                   {isDone ? <CheckCircle2 className="w-3 h-3" /> : rejectedHere ? <XCircle className="w-3 h-3" /> : locked ? <Lock className="w-2.5 h-2.5" /> : i + 1}
                 </span>
                 <span>{step.label}</span>
+                {viewStep !== null && active === i && !locked && (
+                  <span className="text-[8px] px-1.5 py-0.5 border border-primary/60 text-primary tracking-[0.15em]">Viewing</span>
+                )}
+                {viewStep !== null && i === st.currentIdx && active !== i && (
+                  <span className="text-[8px] px-1.5 py-0.5 bg-primary/15 text-primary tracking-[0.15em]">Current</span>
+                )}
               </button>
             </div>
           );
