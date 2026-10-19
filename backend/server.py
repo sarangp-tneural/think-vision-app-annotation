@@ -817,15 +817,35 @@ def _extract_frames_sync(video_bytes: bytes, video_id: str, project_id: str, use
         sync_client.close()
 
 
+def _probe_video_sync(video_bytes: bytes) -> dict:
+    """Read frame count / fps / duration without decoding frames."""
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+        f.write(video_bytes)
+        tmp_path = f.name
+    try:
+        cap = cv2.VideoCapture(tmp_path)
+        if not cap.isOpened():
+            raise ValueError("Could not read video file")
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        cap.release()
+        if total <= 0:
+            raise ValueError("Could not determine video frame count")
+        return {"total_frames": total, "fps": round(fps, 2), "duration": round(total / fps, 2)}
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
 @api_router.post("/projects/{pid}/videos")
 async def upload_video(
     pid: str,
     file: UploadFile = File(...),
-    interval_frames: int = Form(30),
-    interval_seconds: float = Form(0),
-    background: BackgroundTasks = None,
     current=Depends(get_current_user),
 ):
+    """Store the video and probe its metadata. Extraction starts later via /videos/{vid}/process."""
     await _require_not_reviewer(pid, current["id"])
     ext = (file.filename.rsplit(".", 1)[-1] if "." in file.filename else "mp4").lower()
     if ext not in ["mp4", "mov", "webm", "avi", "mkv"]:
@@ -833,6 +853,10 @@ async def upload_video(
     content = await file.read()
     if len(content) > 200 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Video too large (max 200MB)")
+    try:
+        meta = await asyncio.to_thread(_probe_video_sync, content)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     video_id = str(uuid.uuid4())
     storage_path = f"{APP_NAME}/projects/{pid}/videos/{video_id}.{ext}"
     try:
@@ -846,27 +870,49 @@ async def upload_video(
         "filename": file.filename,
         "storage_path": result["path"],
         "size": result.get("size", len(content)),
-        "interval_frames": interval_frames,
-        "interval_seconds": interval_seconds if interval_seconds > 0 else None,
-        "status": "queued",
+        "interval_frames": 30,
+        "interval_seconds": None,
+        "status": "ready",
         "extracted_count": 0,
         "processed_frames": 0,
-        "total_frames": 0,
+        **meta,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.videos.insert_one(doc)
-
-    # Schedule background frame extraction
-    async def _job():
-        await asyncio.to_thread(_extract_frames_sync, content, video_id, pid, current["id"], interval_frames, interval_seconds if interval_seconds > 0 else None)
-
-    if background is not None:
-        background.add_task(_job)
-    else:
-        asyncio.create_task(_job())
-
     doc.pop("_id", None)
     return doc
+
+
+@api_router.post("/videos/{vid}/process")
+async def process_video(
+    vid: str,
+    interval_frames: int = Form(30),
+    interval_seconds: float = Form(0),
+    current=Depends(get_current_user),
+):
+    v = await db.videos.find_one({"id": vid}, {"_id": 0})
+    if not v:
+        raise HTTPException(status_code=404, detail="Not found")
+    await _require_not_reviewer(v["project_id"], current["id"])
+    if v.get("status") != "ready":
+        raise HTTPException(status_code=400, detail="Video is not ready for processing")
+    if interval_frames < 1 and interval_seconds <= 0:
+        raise HTTPException(status_code=400, detail="Interval must be greater than 0")
+    secs = interval_seconds if interval_seconds > 0 else None
+    await db.videos.update_one({"id": vid}, {"$set": {
+        "interval_frames": max(1, interval_frames), "interval_seconds": secs, "status": "queued",
+    }})
+    try:
+        content, _ = await asyncio.to_thread(get_object, v["storage_path"])
+    except Exception as e:
+        await db.videos.update_one({"id": vid}, {"$set": {"status": "failed", "error": str(e)}})
+        raise HTTPException(status_code=500, detail=f"Could not load video: {e}")
+
+    async def _job():
+        await asyncio.to_thread(_extract_frames_sync, content, vid, v["project_id"], current["id"], max(1, interval_frames), secs)
+
+    asyncio.create_task(_job())
+    return {**v, "status": "queued", "interval_frames": max(1, interval_frames), "interval_seconds": secs}
 
 
 @api_router.get("/projects/{pid}/videos")

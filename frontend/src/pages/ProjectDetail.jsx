@@ -32,6 +32,7 @@ export default function ProjectDetail() {
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [processingVideo, setProcessingVideo] = useState(false);
   const [deleteIds, setDeleteIds] = useState(null); // ids waiting for delete confirmation
   const [alsoApproved, setAlsoApproved] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -140,21 +141,46 @@ export default function ProjectDetail() {
     setUploading(true);
     const fd = new FormData();
     fd.append("file", file);
-    if (videoIntervalMode === "seconds") {
-      fd.append("interval_seconds", String(videoInterval));
-      fd.append("interval_frames", "30");
-    } else {
-      fd.append("interval_frames", String(videoInterval));
-      fd.append("interval_seconds", "0");
-    }
     try {
       await api.post(`/projects/${pid}/videos`, fd, { headers: { "Content-Type": "multipart/form-data" } });
-      toast.success("Video queued for frame extraction");
-      load();
+      toast.success("Video uploaded. Choose extraction settings, then process.");
+      await load();
     } catch (e) {
       toast.error(e.response?.data?.detail || "Video upload failed");
     } finally {
       setUploading(false);
+      if (videoInputRef.current) videoInputRef.current.value = "";
+    }
+  };
+
+  // First uploaded-but-unprocessed video drives the settings/preview card
+  const pendingVideo = videos.find((v) => v.status === "ready");
+  const pendingFps = pendingVideo?.fps || 30;
+  const pendingTotal = pendingVideo?.total_frames || 0;
+  const resolvedInterval = videoIntervalMode === "seconds"
+    ? Math.max(1, Math.round(videoInterval * pendingFps))
+    : Math.max(1, Math.floor(videoInterval) || 1);
+  const estimatedFrames = pendingTotal > 0 ? Math.ceil(pendingTotal / resolvedInterval) : 0;
+
+  const processVideo = async () => {
+    if (!pendingVideo) return;
+    setProcessingVideo(true);
+    const fd = new FormData();
+    if (videoIntervalMode === "seconds") {
+      fd.append("interval_seconds", String(videoInterval));
+      fd.append("interval_frames", "30");
+    } else {
+      fd.append("interval_frames", String(resolvedInterval));
+      fd.append("interval_seconds", "0");
+    }
+    try {
+      await api.post(`/videos/${pendingVideo.id}/process`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+      toast.success("Video queued for frame extraction");
+      await load();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Could not start processing");
+    } finally {
+      setProcessingVideo(false);
     }
   };
 
@@ -1417,7 +1443,35 @@ export default function ProjectDetail() {
             <div className="space-y-6">
               <div className="panel p-6">
                 <div className="text-[10px] uppercase tracking-[0.3em] text-primary mb-4">// Upload video</div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+                <div className="grid grid-cols-1 gap-4 items-end">
+                  <div>
+                    <Button
+                      onClick={() => videoInputRef.current?.click()}
+                      disabled={uploading || !!pendingVideo}
+                      className="rounded-sm bg-primary text-black hover:bg-cyan-400 h-10 text-xs uppercase tracking-[0.2em] font-bold w-full"
+                      data-testid="video-upload-btn"
+                    >
+                      <Video className="w-4 h-4 mr-2" /> {uploading ? "Uploading..." : "Select Video"}
+                    </Button>
+                    <input
+                      ref={videoInputRef}
+                      type="file"
+                      accept="video/mp4,video/quicktime,video/webm,video/x-msvideo"
+                      className="hidden"
+                      onChange={(e) => uploadVideo(e.target.files?.[0])}
+                      data-testid="video-file-input"
+                    />
+                  </div>
+                </div>
+                {pendingVideo && (
+                  <div className="mt-6 border-t border-[#27272A] pt-6" data-testid="video-pending-card">
+                    <div className="font-heading font-medium text-sm truncate mb-3">{pendingVideo.filename}</div>
+                    <div className="grid grid-cols-3 gap-4 mb-6">
+                      <div><div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Total frames</div><div className="font-heading text-lg" data-testid="video-total-frames">{pendingTotal}</div></div>
+                      <div><div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">FPS</div><div className="font-heading text-lg">{pendingFps}</div></div>
+                      <div><div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Duration</div><div className="font-heading text-lg">{pendingVideo.duration}s</div></div>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
                   <div>
                     <Label className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-2 block">Extract Mode</Label>
                     <Select value={videoIntervalMode} onValueChange={setVideoIntervalMode}>
@@ -1449,25 +1503,34 @@ export default function ProjectDetail() {
                         : `Grab 1 frame every ${videoInterval} frames`}
                     </div>
                   </div>
-                  <div>
-                    <Button
-                      onClick={() => videoInputRef.current?.click()}
-                      disabled={uploading}
-                      className="rounded-sm bg-primary text-black hover:bg-cyan-400 h-10 text-xs uppercase tracking-[0.2em] font-bold w-full"
-                      data-testid="video-upload-btn"
-                    >
-                      <Video className="w-4 h-4 mr-2" /> {uploading ? "Uploading..." : "Select Video"}
-                    </Button>
-                    <input
-                      ref={videoInputRef}
-                      type="file"
-                      accept="video/mp4,video/quicktime,video/webm,video/x-msvideo"
-                      className="hidden"
-                      onChange={(e) => uploadVideo(e.target.files?.[0])}
-                      data-testid="video-file-input"
-                    />
+                    </div>
+                    <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
+                      <div className="text-sm" data-testid="video-frame-estimate">
+                        You will get <span className="text-primary font-bold">{estimatedFrames}</span> frames
+                        <span className="text-muted-foreground"> (1 every {resolvedInterval} frames of {pendingTotal})</span>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button
+                          variant="outline"
+                          onClick={() => deleteVideo(pendingVideo.id)}
+                          disabled={processingVideo}
+                          className="rounded-sm border-[#27272A] h-10 text-xs uppercase tracking-[0.2em]"
+                          data-testid="video-cancel-btn"
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          onClick={processVideo}
+                          disabled={processingVideo || estimatedFrames < 1}
+                          className="rounded-sm bg-primary text-black hover:bg-cyan-400 h-10 text-xs uppercase tracking-[0.2em] font-bold"
+                          data-testid="video-process-btn"
+                        >
+                          {processingVideo ? "Starting..." : "Process"}
+                        </Button>
+                      </div>
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
 
               {videos.length === 0 ? (
@@ -1490,7 +1553,9 @@ export default function ProjectDetail() {
                           <div className="flex-1 min-w-0">
                             <div className="font-heading font-medium text-sm truncate">{v.filename}</div>
                             <div className="text-xs text-muted-foreground">
-                              {v.extracted_count} frame{v.extracted_count !== 1 ? "s" : ""} extracted · every {v.interval_frames} frames · {v.status}
+                              {v.status === "ready"
+                                ? `${v.total_frames} frames · not processed yet`
+                                : `${v.extracted_count} frame${v.extracted_count !== 1 ? "s" : ""} extracted · every ${v.resolved_interval_frames || v.interval_frames} frames · ${v.status}`}
                             </div>
                             {isProcessing && (
                               <div className="mt-2 h-1 bg-[#27272A] max-w-md">
