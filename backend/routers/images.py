@@ -279,6 +279,39 @@ def register(s):
         await s._log_activity(img["project_id"], current["id"], "image_withdrawn", {"image_id": img_id})
         return {"ok": True, "review_status": "assigned"}
 
+    @router.post("/images/{img_id}/undo-review")
+    async def undo_review(img_id: str, current=Depends(get_current_user)):
+        """approved/rejected -> submitted, so a mis-click can be corrected and the image reviewed again.
+        Only the reviewer who made the call (or an owner/admin) can take it back."""
+        img = await db.images.find_one({"id": img_id})
+        if not img:
+            raise HTTPException(status_code=404, detail="Not found")
+        project = await db.projects.find_one({"id": img["project_id"]})
+        tid = project.get("team_id")
+        is_manager = False
+        if tid:
+            m = await s._get_membership(tid, current["id"])
+            if not m or m["role"] not in ["owner", "admin", "reviewer"]:
+                raise HTTPException(status_code=403, detail="Only owners/admins/reviewers can undo a review")
+            is_manager = m["role"] in ["owner", "admin"]
+        else:
+            await s._project_access_check(img["project_id"], current["id"])
+            is_manager = True
+        if not is_manager and img.get("reviewed_by") != current["id"]:
+            raise HTTPException(status_code=403, detail="Only the reviewer who made this decision can undo it")
+        prev = img.get("review_status")
+        # Match on the status so this can't race another review action.
+        res = await db.images.update_one(
+            {"id": img_id, "review_status": {"$in": ["approved", "rejected"]}},
+            {"$set": {"review_status": "submitted", "review_notes": "", "reviewed_by": None, "reviewed_at": None}})
+        if not res.matched_count:
+            raise HTTPException(status_code=409, detail="Only approved or rejected images can be undone")
+        await s._log_activity(img["project_id"], current["id"], "image_review_undone", {"image_id": img_id, "previous": prev})
+        if img.get("assigned_to") and img["assigned_to"] != current["id"]:
+            await s._notify(img["assigned_to"], "review_reverted", "A review decision on your image was reverted",
+                            project_id=img["project_id"], image_id=img_id)
+        return {"ok": True, "review_status": "submitted"}
+
     @router.post("/images/{img_id}/reopen")
     async def reopen_image(img_id: str, payload: ReopenIn, current=Depends(get_current_user)):
         """approved -> rejected, so an approved (e.g. imported) image can be corrected. It then follows the normal

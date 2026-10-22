@@ -568,10 +568,29 @@ export default function Annotator() {
     }
   };
 
+  // Takes an approve/reject back (-> submitted) so it can be decided again; reopens the image if we've moved on.
+  const undoReview = async (id) => {
+    try {
+      await api.post(`/images/${id}/undo-review`);
+      patchListStatus(id, "submitted");
+      toast.success("Review undone - back in the queue");
+      if (id === imgId) setImage((im) => (im ? { ...im, review_status: "submitted", review_notes: "" } : im));
+      else navigate(`/projects/${pid}/annotate/${id}`);
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Undo failed");
+    }
+  };
+
+  const reviewToast = (decision, id) =>
+    toast.success(decision === "approve" ? "Approved" : "Rejected", {
+      duration: 8000,
+      action: { label: "Undo", onClick: () => undoReview(id) },
+    });
+
   const review = async (decision, notes = "") => {
     try {
       await api.post(`/images/${imgId}/review`, { decision, notes });
-      toast.success(decision === "approve" ? "Approved" : "Rejected");
+      reviewToast(decision, imgId);
       setImage({ ...image, review_status: decision === "approve" ? "approved" : "rejected", review_notes: notes });
     } catch (e) {
       toast.error(e.response?.data?.detail || "Review failed");
@@ -657,7 +676,7 @@ export default function Annotator() {
         nextInQueue(imgId).catch(() => null),
       ]);
       patchListStatus(imgId, decision === "approve" ? "approved" : "rejected");
-      toast.success(decision === "approve" ? "Approved" : "Rejected");
+      reviewToast(decision, imgId);
       setRejecting(false);
       setRejectNote("");
       openNext(nextId);
@@ -1356,6 +1375,17 @@ export default function Annotator() {
                     <XCircle className="w-3 h-3 mr-1" /> Reject
                   </Button>
                 </div>
+              )}
+              {canReview && (reviewStatus === "approved" || reviewStatus === "rejected") && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => undoReview(imgId)}
+                  className="w-full rounded-sm border-[#27272A] bg-transparent hover:border-primary hover:text-primary h-8 text-xs uppercase tracking-[0.2em]"
+                  data-testid="undo-review-btn"
+                >
+                  <Undo2 className="w-3 h-3 mr-2" /> Undo {reviewStatus === "approved" ? "approval" : "rejection"}
+                </Button>
               )}
               {rejecting && canReview && reviewStatus === "submitted" && (
                 <div className="space-y-2" data-testid="reject-note-box">
