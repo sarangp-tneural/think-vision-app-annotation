@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import Navbar from "@/components/Navbar";
 import { toast } from "sonner";
+import ActivitySummary from "@/pages/ActivitySummary";
 import { Activity as ActivityIcon, UserPlus, UserMinus, Image as ImageIcon, CheckCircle2, XCircle, Send, MessageSquare, Sparkles, GitBranch, Pencil } from "lucide-react";
 
 const ACTION_ICONS = {
@@ -26,6 +27,7 @@ export default function Activity() {
   const { pid } = useParams();
   const [items, setItems] = useState([]);
   const [project, setProject] = useState(null);
+  const [tab, setTab] = useState("summary");
 
   useEffect(() => {
     (async () => {
@@ -56,10 +58,22 @@ export default function Activity() {
         <div className="mb-10">
           <div className="text-[10px] uppercase tracking-[0.3em] text-primary mb-3">// Audit log</div>
           <h1 className="font-heading text-4xl font-bold tracking-tight mb-2">Activity</h1>
-          <p className="text-sm text-muted-foreground">{items.length} entries · project audit history</p>
+          <p className="text-sm text-muted-foreground">{tab === "log" ? `${items.length} entries · project audit history` : "Assigned vs finished work, per person"}</p>
         </div>
 
-        {items.length === 0 ? (
+        <div className="flex gap-6 border-b border-[#27272A] mb-8" role="tablist">
+          {[["summary", "Summary"], ["log", "Log"]].map(([k, label]) => (
+            <button key={k} type="button" role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
+              data-testid={`activity-tab-${k}`}
+              className={`pb-3 -mb-px text-xs uppercase tracking-[0.2em] border-b-2 ${tab === k ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {tab === "summary" ? (
+          <ActivitySummary pid={pid} />
+        ) : items.length === 0 ? (
           <div className="border border-dashed border-[#27272A] p-16 text-center">
             <ActivityIcon className="w-10 h-10 text-muted-foreground mx-auto mb-6" strokeWidth={1.5} />
             <h3 className="font-heading text-xl mb-2">No activity yet</h3>
