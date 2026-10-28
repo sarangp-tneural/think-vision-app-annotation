@@ -50,7 +50,7 @@ export default function Annotator() {
   const [project, setProject] = useState(null);
   const [members, setMembers] = useState([]);
   const [boxes, setBoxes] = useState([]);
-  const [activeLabel, setActiveLabel] = useState("object");
+  const [activeLabel, setActiveLabel] = useState("");
   const [newLabel, setNewLabel] = useState("");
   const [renamingClass, setRenamingClass] = useState(null); // { from, value }
   const [activeTool, setActiveTool] = useState("bbox");
@@ -112,7 +112,7 @@ export default function Annotator() {
       ]);
       setProject(pRes.data);
       setImages(listRes.data);
-      if (pRes.data.classes.length > 0) setActiveLabel((cur) => cur || pRes.data.classes[0]);
+      if (pRes.data.classes.length > 0) setActiveLabel((cur) => (cur && pRes.data.classes.includes(cur) ? cur : pRes.data.classes[0]));
       if (pRes.data.team_id) {
         try {
           const t = await api.get(`/teams/${pRes.data.team_id}`);
@@ -215,7 +215,7 @@ export default function Annotator() {
     }
     if (readOnly) return;
     const p = getPos(e);
-    const label = activeLabel || "object";
+    const label = activeLabel || project?.classes?.[0] || "object";
 
     // Clicked empty canvas → deselect current bbox
     setSelectedIdx(null);
@@ -318,7 +318,7 @@ export default function Annotator() {
     if (panning) { setPanning(null); return; }
     if (editing) { setEditing(null); return; }
     if (!drawing) return;
-    const label = activeLabel || "object";
+    const label = activeLabel || project?.classes?.[0] || "object";
     if (drawing.tool === "bbox" && drawing.w > 0.005 && drawing.h > 0.005) {
       commitBoxes([...boxes, { type: "bbox", label, x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h }]);
     } else if (drawing.tool === "ellipse" && drawing.rx > 0.005 && drawing.ry > 0.005) {
@@ -352,7 +352,7 @@ export default function Annotator() {
 
   const finishPoly = () => {
     if (polyPoints.length < 2) { setPolyPoints([]); return; }
-    const label = activeLabel || "object";
+    const label = activeLabel || project?.classes?.[0] || "object";
     if (activeTool === "polygon" && polyPoints.length >= 3) {
       commitBoxes([...boxes, { type: "polygon", label, points: polyPoints }]);
     } else if (activeTool === "polyline" && polyPoints.length >= 2) {
