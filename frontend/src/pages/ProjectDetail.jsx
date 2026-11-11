@@ -1569,6 +1569,11 @@ export default function ProjectDetail() {
                                 ? `${v.total_frames} frames · not processed yet`
                                 : `${v.extracted_count} frame${v.extracted_count !== 1 ? "s" : ""} extracted · every ${v.resolved_interval_frames || v.interval_frames} frames · ${v.status}`}
                             </div>
+                            {v.created_at && (
+                              <div className="text-xs text-muted-foreground" data-testid={`video-uploaded-at-${v.id}`}>
+                                Uploaded {formatDateTime(v.created_at)}
+                              </div>
+                            )}
                             {isProcessing && (
                               <div className="mt-2 h-1 bg-[#27272A] max-w-md">
                                 <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} data-testid={`video-progress-${v.id}`} />
