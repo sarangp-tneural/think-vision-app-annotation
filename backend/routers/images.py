@@ -175,7 +175,8 @@ def register(s):
             m = await db.team_members.find_one({"team_id": tid, "user_id": target, "status": "active"})
             if not m:
                 raise HTTPException(status_code=400, detail="User is not a member of this team")
-        update = {"assigned_to": target, "review_status": "assigned" if target else "unassigned"}
+        update = {"assigned_to": target, "review_status": "assigned" if target else "unassigned",
+                  "assigned_at": datetime.now(timezone.utc).isoformat() if target else None}
         await db.images.update_one({"id": img_id}, {"$set": update})
         await s._log_activity(img["project_id"], current["id"], "image_assigned" if target else "image_unassigned", {"image_id": img_id, "user_id": target})
         if target and target != current["id"]:

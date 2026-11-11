@@ -1164,6 +1164,7 @@ async def bulk_assign_images(pid: str, payload: BulkAssignIn, current=Depends(ge
     if payload.user_id is not None:
         update["assigned_to"] = payload.user_id
         update["review_status"] = "assigned" if payload.user_id else "unassigned"
+        update["assigned_at"] = datetime.now(timezone.utc).isoformat() if payload.user_id else None
     if payload.priority:
         update["priority"] = payload.priority
     if payload.due_date is not None:
@@ -1211,7 +1212,7 @@ async def bulk_assign_split(pid: str, payload: BulkSplitAssignIn, current=Depend
     ordered = list(dict.fromkeys(i for i in payload.image_ids if i in status_by_id))
     # Locked images (under review / approved) can't be reassigned; drop them first so the split stays even.
     open_ids = [i for i in ordered if status_by_id[i] not in LOCKED_STATUSES]
-    common = {"review_status": "assigned"}
+    common = {"review_status": "assigned", "assigned_at": datetime.now(timezone.utc).isoformat()}
     if payload.priority:
         common["priority"] = payload.priority
     if payload.due_date is not None:
@@ -1251,14 +1252,15 @@ async def bulk_assign_review(pid: str, payload: BulkAssignReviewIn, current=Depe
     open_ids = [i for i in ordered if status_by_id[i] != "approved"]  # approved images are done, nothing left to review
     flt = lambda ids: {"id": {"$in": ids}, "project_id": pid, "review_status": {"$ne": "approved"}}
     assignments = []
+    now_iso = datetime.now(timezone.utc).isoformat()
     if not user_ids:
-        res = await db.images.update_many(flt(open_ids), {"$set": {"reviewer_id": None}})
+        res = await db.images.update_many(flt(open_ids), {"$set": {"reviewer_id": None, "reviewer_assigned_at": None}})
         total = res.modified_count
     else:
         for uid, chunk in zip(user_ids, _split_evenly(open_ids, len(user_ids))):
             if not chunk:
                 continue
-            res = await db.images.update_many(flt(chunk), {"$set": {"reviewer_id": uid}})
+            res = await db.images.update_many(flt(chunk), {"$set": {"reviewer_id": uid, "reviewer_assigned_at": now_iso}})
             assignments.append({"user_id": uid, "count": res.modified_count})
             if uid != current["id"] and res.modified_count:
                 await _notify(uid, "review_assigned", f"{res.modified_count} image(s) assigned to you for review in '{p['name']}'", project_id=pid)

@@ -17,6 +17,7 @@ import { Upload, Sparkles, ImageIcon, GitBranch, Rocket, CheckCircle2, Trash2, V
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { formatDateTime } from "@/lib/utils";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -440,6 +441,9 @@ export default function ProjectDetail() {
             </div>
             <h1 className="font-heading text-3xl md:text-4xl font-bold tracking-tight mb-2">{project.name}</h1>
             <p className="text-sm text-muted-foreground max-w-2xl">{project.description || "No description"}</p>
+            {project.created_at && (
+              <p className="text-[11px] text-muted-foreground mt-1" data-testid="project-created-at">Created {formatDateTime(project.created_at)}</p>
+            )}
           </div>
 
           <div className="flex items-center gap-3">
@@ -1427,6 +1431,14 @@ export default function ProjectDetail() {
                           <div className="text-[10px] truncate text-muted-foreground" data-testid={`assignee-${img.id}`}>
                             {img.assigned_to ? (assigneeName(img.assigned_to) || "Unknown member") : "Unassigned"}
                           </div>
+                          <div className="text-[10px] truncate text-muted-foreground" title={formatDateTime(img.created_at)} data-testid={`uploaded-at-${img.id}`}>
+                            Uploaded {formatDateTime(img.created_at) || "—"}
+                          </div>
+                          {img.assigned_to && img.assigned_at && (
+                            <div className="text-[10px] truncate text-muted-foreground" title={formatDateTime(img.assigned_at)} data-testid={`assigned-at-${img.id}`}>
+                              Assigned {formatDateTime(img.assigned_at)}
+                            </div>
+                          )}
                           <div className="text-[10px] text-primary mt-1">
                             {img.annotation_count || 0} annotation{(img.annotation_count || 0) !== 1 ? "s" : ""}
                           </div>
