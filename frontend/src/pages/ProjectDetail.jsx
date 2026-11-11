@@ -66,6 +66,8 @@ export default function ProjectDetail() {
   const [exportFormat, setExportFormat] = useState("yolo");
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState("");
+  const [approveInfo, setApproveInfo] = useState(null); // { submitted, total } while the bulk-approve confirm is open
+  const [approving, setApproving] = useState(false);
   const [bulkUser, setBulkUser] = useState("");
   const [bulkMode, setBulkMode] = useState("single"); // "single" | "split"
   const [bulkFor, setBulkFor] = useState("annotate"); // "annotate" | "review"
@@ -478,6 +480,35 @@ export default function ProjectDetail() {
     } finally {
       setExporting(false);
       setExportProgress("");
+    }
+  };
+
+  const canReview = canManage || myRole === "reviewer";
+  const openBulkApprove = async () => {
+    try {
+      const known = new Map((await api.get(`/projects/${pid}/images/ids`)).data.map((i) => [i.id, i.review_status]));
+      const submitted = [...selectedIds].filter((id) => known.get(id) === "submitted").length;
+      if (submitted === 0) return toast.info("None of the selected images are in review");
+      setApproveInfo({ submitted, total: selectedIds.size });
+    } catch (e) { toast.error("Could not check the selection"); }
+  };
+  const confirmBulkApprove = async () => {
+    setApproving(true);
+    try {
+      const { data } = await api.post(`/projects/${pid}/images/bulk-review`, { image_ids: [...selectedIds], decision: "approve" });
+      const skipped = [
+        data.skipped_not_submitted && `${data.skipped_not_submitted} not in review`,
+        data.skipped_other_reviewer && `${data.skipped_other_reviewer} assigned to another reviewer`,
+        data.skipped_own && `${data.skipped_own} are your own`,
+      ].filter(Boolean);
+      toast.success(`${data.approved} approved${skipped.length ? ` (${skipped.join(", ")} skipped)` : ""}`);
+      setApproveInfo(null);
+      setSelectedIds(new Set());
+      load();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Bulk approve failed");
+    } finally {
+      setApproving(false);
     }
   };
 
@@ -1071,6 +1102,33 @@ export default function ProjectDetail() {
                     </DialogFooter>
                   </DialogContent>
                 </Dialog>
+                {canReview && selectedIds.size > 0 && (
+                  <Button
+                    variant="outline"
+                    onClick={openBulkApprove}
+                    className="rounded-sm border-[#22C55E] text-[#22C55E] bg-transparent hover:bg-[#22C55E]/10 text-xs uppercase tracking-[0.2em]"
+                    data-testid="bulk-approve-btn"
+                  >
+                    <CheckCircle2 className="w-3 h-3 mr-2" /> Approve ({selectedIds.size})
+                  </Button>
+                )}
+                <AlertDialog open={!!approveInfo} onOpenChange={(o) => { if (!o && !approving) setApproveInfo(null); }}>
+                  <AlertDialogContent className="bg-[#121212] border-[#27272A] rounded-sm">
+                    <AlertDialogHeader>
+                      <AlertDialogTitle className="font-heading tracking-tight">Approve {approveInfo?.submitted} image{approveInfo?.submitted === 1 ? "" : "s"}?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        This marks them approved and notifies the annotators.
+                        {approveInfo && approveInfo.submitted < approveInfo.total ? ` ${approveInfo.total - approveInfo.submitted} of the ${approveInfo.total} selected are not in review and will be skipped.` : ""}
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel disabled={approving} className="rounded-sm">Cancel</AlertDialogCancel>
+                      <Button onClick={confirmBulkApprove} disabled={approving} className="rounded-sm bg-[#22C55E] text-black hover:bg-[#22C55E]/90" data-testid="bulk-approve-confirm">
+                        {approving ? "Approving..." : "Approve"}
+                      </Button>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
                 {canManage && selectedIds.size > 0 && (
                   <Button
                     variant="outline"

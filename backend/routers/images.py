@@ -12,6 +12,11 @@ from pydantic import BaseModel
 router = APIRouter()
 
 
+class BulkReviewIn(BaseModel):
+    image_ids: list[str]
+    decision: str = "approve"
+
+
 class BulkDeleteIn(BaseModel):
     image_ids: list[str]
     include_approved: bool = False  # approved images are only deleted when this is set
@@ -301,6 +306,54 @@ def register(s):
         }})
         background.add_task(_after_review, img, project, payload, current["id"])
         return {"ok": True}
+
+    @router.post("/projects/{pid}/images/bulk-review")
+    async def bulk_review_images(pid: str, payload: BulkReviewIn, current=Depends(get_current_user)):
+        """Approve many submitted images at once. Same rules as POST /images/{id}/review, applied per image."""
+        if payload.decision != "approve":
+            raise HTTPException(status_code=400, detail="Only bulk approve is supported")
+        project = await s._verify_project(pid, current["id"])
+        tid = project.get("team_id")
+        role = "owner"
+        if tid:
+            m = await s._get_membership(tid, current["id"])
+            if not m or m["role"] not in ["owner", "admin", "reviewer"]:
+                raise HTTPException(status_code=403, detail="Only owners/admins/reviewers can review")
+            role = m["role"]
+        else:
+            await s._project_access_check(pid, current["id"])
+        me = current["id"]
+        ids = list(dict.fromkeys(payload.image_ids))
+        docs = await db.images.find({"id": {"$in": ids}, "project_id": pid},
+                                    {"id": 1, "review_status": 1, "reviewer_id": 1, "annotated_by": 1, "assigned_to": 1, "_id": 0}).to_list(None)
+        guard_own = bool(tid) and await s._has_other_reviewer(tid, me)
+        eligible, not_submitted, other_reviewer, own = [], 0, 0, 0
+        for d in docs:
+            if d.get("review_status") != "submitted":
+                not_submitted += 1
+            elif d.get("reviewer_id") and d["reviewer_id"] != me and role not in ("owner", "admin"):
+                other_reviewer += 1
+            elif guard_own and me in (d.get("annotated_by"), d.get("assigned_to")):
+                own += 1
+            else:
+                eligible.append(d)
+        approved = 0
+        if eligible:
+            res = await db.images.update_many(
+                {"id": {"$in": [d["id"] for d in eligible]}, "project_id": pid, "review_status": "submitted"},
+                {"$set": {"review_status": "approved", "review_notes": "", "reviewed_by": me,
+                          "reviewed_at": datetime.now(timezone.utc).isoformat()}})
+            approved = res.modified_count
+            await s._log_activity(pid, me, "bulk_approved", {"count": approved})
+            per_user = {}
+            for d in eligible:
+                if d.get("assigned_to") and d["assigned_to"] != me:
+                    per_user[d["assigned_to"]] = per_user.get(d["assigned_to"], 0) + 1
+            for uid, n in per_user.items():
+                await s._notify(uid, "review_completed", f"{n} of your annotation(s) were approved in '{project['name']}'", project_id=pid)
+            await s._maybe_send_retrain_nudge(project, me)
+        return {"approved": approved, "skipped_not_submitted": not_submitted + (len(ids) - len(docs)),
+                "skipped_other_reviewer": other_reviewer, "skipped_own": own}
 
     @router.post("/images/{img_id}/withdraw")
     async def withdraw_image(img_id: str, current=Depends(get_current_user)):
