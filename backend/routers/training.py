@@ -31,7 +31,7 @@ def register(s):
         await s._require_not_reviewer(pid, current["id"])
         if epochs < 0 or epochs > 200:
             raise HTTPException(status_code=400, detail="epochs must be between 0 (auto) and 200")
-        approved = await db.images.count_documents({"project_id": pid, "review_status": "approved", "annotations.0": {"$exists": True}})
+        approved = await db.images.count_documents({"project_id": pid, "review_status": "approved", **s.HAS_LABELS})
         annotated = approved  # only reviewed-and-approved images are used for training
         total_eligible = approved
         if total_eligible < s.MIN_TRAINING_IMAGES:
@@ -65,7 +65,7 @@ def register(s):
     async def train_remote_model(pid: str, payload: TrainRemoteRequest, background: BackgroundTasks, current=Depends(get_current_user)):
         """Same as train-real, but the training runs on a host server over SSH. Owner/admin only, like the deploy pipeline."""
         await s._project_access_check(pid, current["id"], roles=["owner", "admin"])
-        approved = await db.images.count_documents({"project_id": pid, "review_status": "approved", "annotations.0": {"$exists": True}})
+        approved = await db.images.count_documents({"project_id": pid, "review_status": "approved", **s.HAS_LABELS})
         if approved < s.MIN_TRAINING_IMAGES:
             raise HTTPException(status_code=400, detail=f"Need at least {s.MIN_TRAINING_IMAGES} approved images (have {approved})")
         effective_epochs = s.auto_scale_epochs(approved, requested=payload.epochs if payload.epochs > 0 else None)
@@ -180,7 +180,7 @@ def register(s):
     @router.get("/projects/{pid}/training-plan")
     async def training_plan_preview(pid: str, current=Depends(get_current_user)):
         await s._project_access_check(pid, current["id"])
-        approved = await db.images.count_documents({"project_id": pid, "review_status": "approved", "annotations.0": {"$exists": True}})
+        approved = await db.images.count_documents({"project_id": pid, "review_status": "approved", **s.HAS_LABELS})
         annotated = approved  # only reviewed-and-approved images are used for training
         total_eligible = approved
         epochs = s.auto_scale_epochs(total_eligible)

@@ -310,6 +310,7 @@ class AnnotationBox(BaseModel):
 class SaveAnnotationsIn(BaseModel):
     boxes: List[AnnotationBox]
     submit: bool = False  # save and submit for review in one request
+    is_null: bool = False  # image has nothing to annotate: kept as an empty (background) image
 
 class AssignImageIn(BaseModel):
     user_id: Optional[str] = None  # None = unassign
@@ -587,6 +588,8 @@ async def _project_access(pid: str, user_id: str, roles: Optional[List[str]] = N
 LOCKED_STATUSES = ("submitted", "approved")
 # An image only counts as annotated/done once a reviewer has approved it.
 APPROVED = {"review_status": "approved"}
+# Images that carry a label for training: boxes, or marked null (nothing to annotate = background image).
+HAS_LABELS = {"$or": [{"annotations.0": {"$exists": True}}, {"is_null": True}]}
 
 
 async def _role_in_project(project: dict, user_id: str) -> str:
@@ -1866,7 +1869,7 @@ def _train_yolo_sync(job_id: str, project_id: str, model_arch: str, epochs: int)
         docs = list(sync_db.images.find({
             "project_id": project_id,
             "review_status": "approved",
-            "annotations.0": {"$exists": True},
+            **HAS_LABELS,
         }))
         if len(docs) < MIN_TRAINING_IMAGES:
             raise Exception(f"Need at least {MIN_TRAINING_IMAGES} approved images (have {len(docs)})")

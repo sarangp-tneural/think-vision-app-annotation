@@ -382,8 +382,10 @@ export default function Annotator() {
       // Strip client-only fields (uid) before saving
       // eslint-disable-next-line no-unused-vars
       const cleanBoxes = boxes.map(({ uid, ...rest }) => rest);
-      const { data } = await api.put(`/images/${imgId}/annotations`, { boxes: cleanBoxes });
+      // A rejected null image keeps its null mark until a box is drawn on it.
+      const { data } = await api.put(`/images/${imgId}/annotations`, { boxes: cleanBoxes, is_null: !!image?.is_null && cleanBoxes.length === 0 });
       setDirty(false);
+      if (cleanBoxes.length > 0) setImage((im) => (im && im.is_null ? { ...im, is_null: false } : im));
       setLastSaved(new Date());
       // Saving an unassigned image as owner/admin claims it (the server does the same).
       setImage((im) => (im && !im.assigned_to ? { ...im, assigned_to: currentUser?.id, review_status: "assigned" } : im));
@@ -478,6 +480,7 @@ export default function Annotator() {
     if (meta && e.key === "Enter") { e.preventDefault(); e.shiftKey ? fastRef.current.openReject() : fastRef.current.fastRun(); return; }
     if (!e.shiftKey && !e.altKey && !meta && e.key.toLowerCase() === "r") { e.preventDefault(); repeatRef.current(); return; }
     if (e.key === "]") { fastRef.current.jumpToQueueNext(); return; }
+    if (!e.shiftKey && !e.altKey && !meta && e.key.toLowerCase() === "n") { e.preventDefault(); fastRef.current.markNull(); return; }
     if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
       // Leave arrows alone inside open menus/lists and mid-gesture.
       if (meta || e.altKey || e.target?.closest?.('[role="menu"],[role="listbox"]')) return;
@@ -639,9 +642,34 @@ export default function Annotator() {
     } catch { toast.error("Couldn't find the next image"); }
   };
 
+  // Nothing to annotate: save as a null (background) image and submit it for review.
+  const markNull = async () => {
+    if (fastBusy || saving || readOnly) return;
+    if (!["unassigned", "assigned", "rejected"].includes(reviewStatus)) return;
+    if (boxes.length > 0) { toast.error("Remove the annotations first, a null image has none"); return; }
+    setFastBusy(true);
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    try {
+      const [, nextId] = await Promise.all([
+        api.put(`/images/${imgId}/annotations`, { boxes: [], is_null: true, submit: true }),
+        nextInQueue(imgId).catch(() => null),
+      ]);
+      setDirty(false);
+      setImage((im) => (im ? { ...im, is_null: true, review_status: "submitted", assigned_to: im.assigned_to || currentUser?.id } : im));
+      patchListStatus(imgId, "submitted");
+      toast.success("Marked as null and submitted for review");
+      openNext(nextId);
+    } catch (e) {
+      const detail = e.response?.data?.detail;
+      toast.error(typeof detail === "string" ? detail : "Could not mark as null");
+    } finally {
+      setFastBusy(false);
+    }
+  };
+
   const fastSubmit = async () => {
     if (fastBusy || saving || fastAction !== "submit") return;
-    if (boxes.length === 0) { toast.error("Add at least one annotation before submitting"); return; }
+    if (boxes.length === 0 && !image?.is_null) { toast.error("Add at least one annotation, or use Mark as null"); return; }
     setFastBusy(true);
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     try {
@@ -649,7 +677,7 @@ export default function Annotator() {
       const cleanBoxes = boxes.map(({ uid, ...rest }) => rest);
       // Save+submit is one request; the next-image lookup runs alongside it.
       const [{ data }, nextId] = await Promise.all([
-        api.put(`/images/${imgId}/annotations`, { boxes: cleanBoxes, submit: true }),
+        api.put(`/images/${imgId}/annotations`, { boxes: cleanBoxes, submit: true, is_null: !!image?.is_null && cleanBoxes.length === 0 }),
         nextInQueue(imgId).catch(() => null),
       ]);
       setDirty(false);
@@ -689,7 +717,7 @@ export default function Annotator() {
 
   const fastRun = () => (fastAction === "submit" ? fastSubmit() : fastAction === "review" ? fastReview("approve") : null);
   // Always the latest closures, so the keyboard handler below never acts on stale state.
-  fastRef.current = { fastRun, openReject: () => fastAction === "review" && setRejecting(true), jumpToQueueNext };
+  fastRef.current = { markNull, fastRun, openReject: () => fastAction === "review" && setRejecting(true), jumpToQueueNext };
 
   // While working on this image, warm the browser cache with the next one in the queue.
   useEffect(() => {
@@ -994,6 +1022,7 @@ export default function Annotator() {
               <div className="flex items-center justify-between"><span>Crosshair guides</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">G</kbd></div>
               <div className="flex items-center justify-between"><span>Prev / next image</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">← →</kbd></div>
               <div className="flex items-center justify-between"><span>Save &amp; Submit → Next</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⇧→</kbd></div>
+              <div className="flex items-center justify-between"><span>Mark as null &amp; submit → next</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">N</kbd></div>
               <div className="flex items-center justify-between"><span>Next needing work</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">]</kbd></div>
               <div className="flex items-center justify-between"><span>Undo</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">⌘Z</kbd></div>
               <div className="flex items-center justify-between"><span>Repeat previous</span><kbd className="px-1.5 py-0.5 border border-[#27272A] bg-[#121212]">R</kbd></div>
@@ -1334,6 +1363,24 @@ export default function Annotator() {
 
             {/* Submit / Review actions */}
             <div className="space-y-2">
+              {image?.is_null && (
+                <div className="text-[10px] uppercase tracking-[0.2em] text-[#EAB308] border border-[#EAB308]/40 px-2 py-1 text-center" data-testid="null-badge">
+                  Null: no objects (exported as background)
+                </div>
+              )}
+              {!readOnly && boxes.length === 0 && ["unassigned", "assigned", "rejected"].includes(reviewStatus) && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={markNull}
+                  disabled={fastBusy || saving}
+                  className="w-full rounded-sm border-[#EAB308] text-[#EAB308] bg-transparent hover:bg-[#EAB308]/10 h-8 text-xs uppercase tracking-[0.2em]"
+                  title="Nothing to annotate in this image: submit it as an empty (background) image"
+                  data-testid="mark-null-btn"
+                >
+                  Mark as null &amp; submit <kbd className="ml-2 px-1 border border-[#EAB308]/50">N</kbd>
+                </Button>
+              )}
               {isAssignedToMe && myRole !== "reviewer" && ["assigned", "rejected"].includes(reviewStatus) && (
                 <Button
                   size="sm"
