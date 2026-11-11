@@ -25,11 +25,19 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter,
 } from "@/components/ui/dialog";
 
+// Largest number of approved images the server puts in one export zip (keep in sync with MAX_ZIP_EXPORT_IMAGES in backend/.env).
+const MAX_EXPORT_PART = 20000;
+
 export default function ProjectDetail() {
   const { pid } = useParams();
   const navigate = useNavigate();
   const [project, setProject] = useState(null);
   const [images, setImages] = useState([]);
+  const [imgTotal, setImgTotal] = useState(0); // matching images on the server (the grid only holds the loaded pages)
+  const [counts, setCounts] = useState({ total: 0, unlabeled: 0, by_status: {}, by_assignee: {} });
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [approvalList, setApprovalList] = useState(null);
+  const [filterIds, setFilterIds] = useState(null); // [{id, review_status}] for every image matching the filters, fetched on demand
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -57,6 +65,7 @@ export default function ProjectDetail() {
   const [exportOpen, setExportOpen] = useState(false);
   const [exportFormat, setExportFormat] = useState("yolo");
   const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState("");
   const [bulkUser, setBulkUser] = useState("");
   const [bulkMode, setBulkMode] = useState("single"); // "single" | "split"
   const [bulkFor, setBulkFor] = useState("annotate"); // "annotate" | "review"
@@ -77,15 +86,46 @@ export default function ProjectDetail() {
   const fileInputRef = useRef(null);
   const videoInputRef = useRef(null);
 
+  const filterParams = () => ({
+    status: statusFilter === "all" ? undefined : statusFilter,
+    assignee: assigneeFilter === "all" ? undefined : assigneeFilter,
+  });
+  const fetchImagePage = async (skip) => {
+    const res = await api.get(`/projects/${pid}/images`, { params: { ...filterParams(), skip, limit: 200 } });
+    return { rows: res.data, total: parseInt(res.headers["x-total-count"] || "0", 10) };
+  };
+  const loadMoreImages = async () => {
+    setLoadingMore(true);
+    try {
+      const { rows, total } = await fetchImagePage(images.length);
+      setImages((cur) => [...cur, ...rows]);
+      setImgTotal(total);
+    } catch (e) {
+      toast.error("Failed to load more images");
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+  const fetchFilterIds = async () => {
+    if (filterIds) return filterIds;
+    const { data } = await api.get(`/projects/${pid}/images/ids`, { params: filterParams() });
+    setFilterIds(data);
+    return data;
+  };
+
   const load = async () => {
     try {
-      const [pRes, iRes, vRes] = await Promise.all([
+      const [pRes, page, cRes, vRes] = await Promise.all([
         api.get(`/projects/${pid}`),
-        api.get(`/projects/${pid}/images`),
+        fetchImagePage(0),
+        api.get(`/projects/${pid}/images/counts`),
         api.get(`/projects/${pid}/videos`),
       ]);
       setProject(pRes.data);
-      setImages(iRes.data);
+      setImages(page.rows);
+      setImgTotal(page.total);
+      setCounts(cRes.data);
+      setFilterIds(null);
       setVideos(vRes.data);
       if (pRes.data.settings) setSettings(pRes.data.settings);
       // Load team members + project assignments if project has a team
@@ -111,14 +151,25 @@ export default function ProjectDetail() {
   };
 
   const canManage = myRole === "owner" || myRole === "admin";
-  const matchesFilters = (img) =>
-    (statusFilter === "all" || (img.review_status || "unassigned") === statusFilter) &&
-    (assigneeFilter === "all" ||
-      (assigneeFilter === "unassigned" ? !img.assigned_to : img.assigned_to === assigneeFilter));
-  const assigneeCount = (uid) => images.filter((img) => (uid === "unassigned" ? !img.assigned_to : img.assigned_to === uid)).length;
+  const assigneeCount = (uid) => counts.by_assignee[uid] || 0;
   const assigneeName = (uid) => members.find((m) => m.user_id === uid)?.name;
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [pid]);
+
+  // Filters are applied by the server: refetch the first page when they change (selection is kept).
+  const firstFilterRun = useRef(true);
+  useEffect(() => {
+    if (firstFilterRun.current) { firstFilterRun.current = false; return; }
+    (async () => {
+      try {
+        const { rows, total } = await fetchImagePage(0);
+        setImages(rows);
+        setImgTotal(total);
+        setFilterIds(null);
+      } catch (e) { toast.error("Failed to load images"); }
+    })();
+    // eslint-disable-next-line
+  }, [statusFilter, assigneeFilter]);
 
   // Poll video statuses if any are processing
   useEffect(() => {
@@ -239,7 +290,7 @@ export default function ProjectDetail() {
     } catch { toast.error("Delete failed"); }
   };
 
-  const unlabeledCount = images.filter((i) => !i.annotated).length;
+  const unlabeledCount = counts.unlabeled;
 
   const openBatchLabel = () => {
     if (unlabeledCount === 0) return toast.info("All images are already labeled");
@@ -375,17 +426,50 @@ export default function ProjectDetail() {
     setExporting(true);
     try {
       const ids = [...selectedIds];
-      const res = ids.length
-        ? await api.post(`/projects/${pid}/export`, { format: exportFormat, image_ids: ids }, { responseType: "blob" })
-        : await api.get(`/projects/${pid}/export`, { params: { format: exportFormat }, responseType: "blob" });
-      const url = URL.createObjectURL(res.data);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${project.name}_${exportFormat}.zip`;
-      a.click();
-      URL.revokeObjectURL(url);
-      const skipped = parseInt(res.headers["x-skipped-not-approved"] || "0", 10);
-      toast.success(skipped ? `Exported. ${skipped} selected image${skipped !== 1 ? "s were" : " was"} not approved and skipped` : "Exported");
+      const save = (res, name) => {
+        const url = URL.createObjectURL(res.data);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+      // Approved ids to export: the selection, or every approved image in the project.
+      let approvedIds = null;
+      if (exportFormat !== "split") {
+        if (ids.length) {
+          const known = new Map((await api.get(`/projects/${pid}/images/ids`)).data.map((i) => [i.id, i.review_status]));
+          approvedIds = ids.filter((id) => known.get(id) === "approved");
+        } else {
+          approvedIds = (await api.get(`/projects/${pid}/images/ids`, { params: { status: "approved" } })).data.map((i) => i.id);
+        }
+      }
+      if (approvedIds && approvedIds.length > MAX_EXPORT_PART) {
+        // Too big for one zip: download equal parts. All parts share the top-level "dataset/" folder
+        // and image-id file names, so extracting them into the same place merges into one dataset.
+        const parts = Math.ceil(approvedIds.length / MAX_EXPORT_PART);
+        const size = Math.ceil(approvedIds.length / parts);
+        let idOffset = 0, annOffset = 0, skipped = 0;
+        for (let p = 1; p <= parts; p++) {
+          setExportProgress(`Exporting part ${p} of ${parts}...`);
+          const res = await api.post(`/projects/${pid}/export`, {
+            format: exportFormat, image_ids: approvedIds.slice((p - 1) * size, p * size),
+            part: p, total_parts: parts, id_offset: idOffset, ann_offset: annOffset,
+          }, { responseType: "blob" });
+          save(res, `${project.name}_${exportFormat}_part${p}of${parts}.zip`);
+          idOffset += parseInt(res.headers["x-exported-count"] || "0", 10);
+          annOffset += parseInt(res.headers["x-annotation-count"] || "0", 10);
+          skipped += parseInt(res.headers["x-skipped-not-approved"] || "0", 10);
+        }
+        toast.success(`Downloaded ${parts} zips. Extract them all into the same folder and they merge into one dataset folder.${skipped ? ` ${skipped} not approved and skipped.` : ""}`);
+      } else {
+        const res = ids.length
+          ? await api.post(`/projects/${pid}/export`, { format: exportFormat, image_ids: ids }, { responseType: "blob" })
+          : await api.get(`/projects/${pid}/export`, { params: { format: exportFormat }, responseType: "blob" });
+        save(res, `${project.name}_${exportFormat}.zip`);
+        const skipped = parseInt(res.headers["x-skipped-not-approved"] || "0", 10);
+        toast.success(skipped ? `Exported. ${skipped} selected image${skipped !== 1 ? "s were" : " was"} not approved and skipped` : "Exported");
+      }
       setExportOpen(false);
     } catch (e) {
       let detail = "Export failed";
@@ -393,6 +477,7 @@ export default function ProjectDetail() {
       toast.error(detail);
     } finally {
       setExporting(false);
+      setExportProgress("");
     }
   };
 
@@ -400,6 +485,8 @@ export default function ProjectDetail() {
     e?.stopPropagation();
     setAlsoApproved(false);
     setDeleteIds(ids);
+    // Approved status of ids that aren't in the loaded pages comes from the full id list.
+    api.get(`/projects/${pid}/images/ids`).then((r) => setApprovalList(r.data)).catch(() => {});
   };
 
   const confirmDelete = async () => {
@@ -867,7 +954,7 @@ export default function ProjectDetail() {
         <Tabs defaultValue="images" className="space-y-6">
           <TabsList className="bg-transparent border border-[#27272A] rounded-sm p-0 h-auto">
             <TabsTrigger value="images" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-images">
-              Images ({images.length})
+              Images ({counts.total})
             </TabsTrigger>
             {myRole !== "reviewer" && <TabsTrigger value="upload" className="rounded-sm data-[state=active]:bg-[#1C1C1C] data-[state=active]:text-primary text-xs uppercase tracking-[0.2em] px-4 py-2" data-testid="tab-upload">
               Upload
@@ -940,7 +1027,7 @@ export default function ProjectDetail() {
                     <SelectValue placeholder="All members" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="all">All members ({images.length})</SelectItem>
+                    <SelectItem value="all">All members ({counts.total})</SelectItem>
                     <SelectItem value="unassigned">Unassigned ({assigneeCount("unassigned")})</SelectItem>
                     {members.map((m) => (
                       <SelectItem key={m.user_id} value={m.user_id}>
@@ -974,12 +1061,12 @@ export default function ProjectDetail() {
                           <SelectItem value="voc">Pascal VOC</SelectItem>
                         </SelectContent>
                       </Select>
-                      <p className="text-xs text-muted-foreground">Downloads a zip with the images and their annotations. Only approved images are included.</p>
+                      <p className="text-xs text-muted-foreground">Downloads a zip with the images and their annotations. Only approved images are included. Above 20,000 images the export is split into several zips; extract them all into the same folder to get one dataset.</p>
                     </div>
                     <DialogFooter>
                       <Button variant="outline" onClick={() => setExportOpen(false)} disabled={exporting} className="rounded-sm border-[#27272A] bg-transparent text-xs uppercase tracking-[0.2em]">Cancel</Button>
                       <Button onClick={runExport} disabled={exporting} className="rounded-sm text-xs uppercase tracking-[0.2em] font-bold" data-testid={DATASET_EXPORT.confirm}>
-                        {exporting ? <Loader2 className="w-3 h-3 mr-2 animate-spin" /> : <Download className="w-3 h-3 mr-2" />} {exporting ? "Exporting..." : "Download zip"}
+                        {exporting ? <Loader2 className="w-3 h-3 mr-2 animate-spin" /> : <Download className="w-3 h-3 mr-2" />} {exporting ? (exportProgress || "Exporting...") : "Download zip"}
                       </Button>
                     </DialogFooter>
                   </DialogContent>
@@ -1002,10 +1089,10 @@ export default function ProjectDetail() {
                         This removes the image{deleteIds?.length === 1 ? "" : "s"}, annotations and comments from the project. It cannot be undone.
                       </AlertDialogDescription>
                     </AlertDialogHeader>
-                    {deleteIds && countApproved(images, deleteIds) > 0 && (
+                    {deleteIds && countApproved(approvalList || images, deleteIds) > 0 && (
                       <label className="flex items-start gap-2 text-sm text-destructive cursor-pointer">
                         <input type="checkbox" checked={alsoApproved} onChange={(e) => setAlsoApproved(e.target.checked)} className="mt-1" data-testid={DATASET_DELETE.alsoApproved} />
-                        <span>Also delete {countApproved(images, deleteIds)} approved image{countApproved(images, deleteIds) === 1 ? "" : "s"} (they are kept unless this is ticked)</span>
+                        <span>Also delete {countApproved(approvalList || images, deleteIds)} approved image{countApproved(approvalList || images, deleteIds) === 1 ? "" : "s"} (they are kept unless this is ticked)</span>
                       </label>
                     )}
                     <AlertDialogFooter>
@@ -1124,8 +1211,7 @@ export default function ProjectDetail() {
                               let data;
                               if (bulkFor === "review") {
                                 // Grid order, so each reviewer's block matches what the user sees.
-                                const shownIds = images
-                                  .filter(matchesFilters)
+                                const shownIds = (await fetchFilterIds())
                                   .map((img) => img.id).filter((id) => selectedIds.has(id));
                                 const shownSet = new Set(shownIds);
                                 selectedIds.forEach((id) => { if (!shownSet.has(id)) shownIds.push(id); });
@@ -1135,8 +1221,7 @@ export default function ProjectDetail() {
                                 }));
                               } else if (split) {
                                 // Grid order, so each member's block matches what the user sees.
-                                const orderedIds = images
-                                  .filter(matchesFilters)
+                                const orderedIds = (await fetchFilterIds())
                                   .map((img) => img.id).filter((id) => selectedIds.has(id));
                                 // Selected images hidden by the status filter go last so none are dropped.
                                 const shown = new Set(orderedIds);
@@ -1180,9 +1265,10 @@ export default function ProjectDetail() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => {
-                      const filtered = images.filter(matchesFilters);
-                      const filteredIds = filtered.map((i) => i.id);
+                    onClick={async () => {
+                      let all;
+                      try { all = await fetchFilterIds(); } catch (e) { toast.error("Failed to select all"); return; }
+                      const filteredIds = all.map((i) => i.id);
                       const allSelected = filteredIds.every((id) => selectedIds.has(id));
                       if (allSelected) {
                         // Deselect all filtered
@@ -1201,10 +1287,8 @@ export default function ProjectDetail() {
                     title="Tip: Shift+click photos to select a range, Ctrl/Cmd+click to add or remove one"
                   >
                     {(() => {
-                      const filtered = images.filter(matchesFilters);
-                      const filteredIds = filtered.map((i) => i.id);
-                      const allSelected = filteredIds.length > 0 && filteredIds.every((id) => selectedIds.has(id));
-                      return allSelected ? `Deselect All (${filteredIds.length})` : `Select All (${filteredIds.length})`;
+                      const allSelected = !!filterIds && filterIds.length > 0 && filterIds.every((i) => selectedIds.has(i.id));
+                      return allSelected ? `Deselect All (${imgTotal})` : `Select All (${imgTotal})`;
                     })()}
                   </Button>
                 )}
@@ -1341,7 +1425,7 @@ export default function ProjectDetail() {
             )}
 
             {(() => {
-              const filtered = images.filter(matchesFilters);
+              const filtered = images;
               if (filtered.length === 0) {
                 return (
                   <div className="border border-dashed border-[#27272A] p-16 text-center">
@@ -1446,6 +1530,15 @@ export default function ProjectDetail() {
                       </div>
                     );
                   })}
+                  {images.length < imgTotal && (
+                    <div className="col-span-full flex flex-col items-center gap-2 py-4">
+                      <div className="text-xs text-muted-foreground" data-testid="images-loaded-count">Showing {images.length} of {imgTotal}</div>
+                      <Button variant="outline" size="sm" onClick={loadMoreImages} disabled={loadingMore}
+                        className="rounded-sm border-[#27272A] bg-transparent text-xs uppercase tracking-[0.2em]" data-testid="load-more-images">
+                        {loadingMore ? <Loader2 className="w-3 h-3 mr-2 animate-spin" /> : null} Load more
+                      </Button>
+                    </div>
+                  )}
                 </div>
               );
             })()}

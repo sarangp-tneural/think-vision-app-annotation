@@ -1408,6 +1408,11 @@ async def list_versions(pid: str, current=Depends(get_current_user)):
 class ExportRequest(BaseModel):
     format: str = "yolo"
     image_ids: Optional[List[str]] = None
+    # Batched export: the client splits a big export into parts that merge into one folder when extracted.
+    part: Optional[int] = None
+    total_parts: Optional[int] = None
+    id_offset: int = 0    # COCO: first image id of this part
+    ann_offset: int = 0   # COCO: annotations already used by earlier parts
 
 
 @api_router.get("/projects/{pid}/export")
@@ -1429,10 +1434,11 @@ async def export_selected_dataset(pid: str, payload: ExportRequest, current=Depe
         raise HTTPException(status_code=400, detail="image_ids is required")
     if payload.format == "split":
         raise HTTPException(status_code=400, detail="split export always covers the whole project")
-    return await _export_dataset(pid, payload.format, 0.7, 0.2, 0.1, payload.image_ids, current)
+    batch = (payload.part, payload.total_parts, payload.id_offset, payload.ann_offset) if (payload.total_parts or 0) > 1 else None
+    return await _export_dataset(pid, payload.format, 0.7, 0.2, 0.1, payload.image_ids, current, batch)
 
 
-async def _export_dataset(pid, format, train_pct, valid_pct, test_pct, image_ids, current):
+async def _export_dataset(pid, format, train_pct, valid_pct, test_pct, image_ids, current, batch=None):
     project = await _verify_project(pid, current["id"])
     export_filter = {"project_id": pid, **APPROVED, "annotated": True}
     if image_ids is not None:
@@ -1552,8 +1558,9 @@ async def _export_dataset(pid, format, train_pct, valid_pct, test_pct, image_ids
                 "images": [],
                 "annotations": [],
             }
-            ann_id = 1
-            for i, img in enumerate(images):
+            part_no, total_parts, id_offset, ann_offset = batch or (None, None, 0, 0)
+            ann_id = ann_offset + 1
+            for i, img in enumerate(images, start=id_offset):
                 data, _ = _fetch_image(img)
                 ext = (img["filename"].rsplit(".", 1)[-1] if "." in img["filename"] else "jpg").lower()
                 img_name = f"{img['id']}.{ext}"
@@ -1591,7 +1598,9 @@ async def _export_dataset(pid, format, train_pct, valid_pct, test_pct, image_ids
                         coco_ann["segmentation"] = [seg]
                     coco["annotations"].append(coco_ann)
                     ann_id += 1
-            zf.writestr("dataset/annotations.json", json.dumps(coco, indent=2))
+            coco_name = f"annotations_part{part_no}.json" if batch else "annotations.json"
+            zf.writestr(f"dataset/{coco_name}", json.dumps(coco, indent=2))
+            coco_ann_count = ann_id - 1 - ann_offset
 
         elif format == "voc":
             for img in images:
@@ -1646,7 +1655,9 @@ async def _export_dataset(pid, format, train_pct, valid_pct, test_pct, image_ids
         buf,
         media_type="application/zip",
         headers={
-            "Content-Disposition": f"attachment; filename={project['name']}_{format}.zip",
+            "Content-Disposition": f"attachment; filename={project['name']}_{format}" + (f"_part{batch[0]}of{batch[1]}" if batch else "") + ".zip",
+            "X-Exported-Count": str(len(images)),
+            "X-Annotation-Count": str(coco_ann_count if format == "coco" else 0),
             "X-Skipped-Unknown-Labels": str(skipped_unknown),
             "X-Skipped-Not-Approved": str(max(0, len(set(image_ids)) - len(images)) if image_ids is not None else 0),
         },
@@ -2306,7 +2317,7 @@ app.add_middleware(
     allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition", "X-Skipped-Unknown-Labels", "X-Skipped-Not-Approved"],
+    expose_headers=["Content-Disposition", "X-Skipped-Unknown-Labels", "X-Skipped-Not-Approved", "X-Total-Count", "X-Annotation-Count", "X-Exported-Count"],
 )
 
 

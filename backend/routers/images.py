@@ -5,7 +5,7 @@ import io
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -103,26 +103,68 @@ def register(s):
             out.append({"content_hash": g["_id"], "count": g["count"], "images": imgs})
         return {"groups": out, "unhashed_images": unhashed}
 
-    @router.get("/projects/{pid}/images")
-    async def list_images(pid: str, status: Optional[str] = None, assignee: Optional[str] = None, current=Depends(get_current_user)):
+    async def _image_query(pid: str, status: Optional[str], assignee: Optional[str], current: dict) -> dict:
         _, role = await s._project_access(pid, current["id"])
         q = {"project_id": pid}
-        if status:
+        if status == "unassigned":
+            q["review_status"] = {"$in": [None, "unassigned"]}
+        elif status:
             q["review_status"] = status
         if assignee == "me" or role in s.RESTRICTED_VIEW_ROLES:  # annotators only ever see their own images
             q["assigned_to"] = current["id"]
+        elif assignee == "unassigned":
+            q["assigned_to"] = {"$in": [None, ""]}
         elif assignee:
             q["assigned_to"] = assignee
+        return q
+
+    @router.get("/projects/{pid}/images")
+    async def list_images(pid: str, response: Response, status: Optional[str] = None, assignee: Optional[str] = None,
+                          skip: int = Query(0, ge=0), limit: Optional[int] = Query(None, ge=1, le=500),
+                          current=Depends(get_current_user)):
+        """Without `limit` this is the legacy capped list (used by the annotator). With `limit`/`skip` it pages
+        through every matching image and sets X-Total-Count."""
+        q = await _image_query(pid, status, assignee, current)
         # Annotations are dropped from the list (they can be large); the list
         # only needs the count. Full annotations come from GET /images/{id}.
-        pipeline = [
-            {"$match": q},
-            {"$sort": {"created_at": -1}},
-            {"$limit": 10000},
+        pipeline = [{"$match": q}, {"$sort": {"created_at": -1, "id": -1}}]
+        if limit is None:
+            pipeline.append({"$limit": 10000})
+        else:
+            response.headers["X-Total-Count"] = str(await db.images.count_documents(q))
+            pipeline += [{"$skip": skip}, {"$limit": limit}]
+        pipeline += [
             {"$addFields": {"annotation_count": {"$size": {"$ifNull": ["$annotations", []]}}}},
             {"$project": {"_id": 0, "annotations": 0}},
         ]
-        return await db.images.aggregate(pipeline).to_list(10000)
+        return await db.images.aggregate(pipeline).to_list(limit or 10000)
+
+    @router.get("/projects/{pid}/images/ids")
+    async def list_image_ids(pid: str, status: Optional[str] = None, assignee: Optional[str] = None, current=Depends(get_current_user)):
+        """Every matching image as {id, review_status}, in grid order, so select-all / bulk actions cover the whole project."""
+        q = await _image_query(pid, status, assignee, current)
+        return await db.images.find(q, {"_id": 0, "id": 1, "review_status": 1}).sort([("created_at", -1), ("id", -1)]).to_list(None)
+
+    @router.get("/projects/{pid}/images/counts")
+    async def image_counts(pid: str, current=Depends(get_current_user)):
+        q = await _image_query(pid, None, None, current)
+        res = await db.images.aggregate([
+            {"$match": q},
+            {"$facet": {
+                "total": [{"$count": "n"}],
+                "unlabeled": [{"$match": {"annotated": {"$ne": True}}}, {"$count": "n"}],
+                "by_status": [{"$group": {"_id": {"$ifNull": ["$review_status", "unassigned"]}, "n": {"$sum": 1}}}],
+                "by_assignee": [{"$group": {"_id": {"$ifNull": ["$assigned_to", "unassigned"]}, "n": {"$sum": 1}}}],
+            }},
+        ]).to_list(1)
+        r = res[0] if res else {}
+        one = lambda k: (r.get(k) or [{"n": 0}])[0]["n"]
+        by_assignee = {}
+        for g in r.get("by_assignee", []):
+            key = "unassigned" if g["_id"] in (None, "") else g["_id"]
+            by_assignee[key] = by_assignee.get(key, 0) + g["n"]
+        return {"total": one("total"), "unlabeled": one("unlabeled"),
+                "by_status": {g["_id"]: g["n"] for g in r.get("by_status", [])}, "by_assignee": by_assignee}
 
     @router.get("/projects/{pid}/images/next")
     async def next_image(pid: str, mode: str, after: Optional[str] = None, current=Depends(get_current_user)):
