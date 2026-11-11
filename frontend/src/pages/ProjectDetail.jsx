@@ -1628,6 +1628,16 @@ export default function ProjectDetail() {
                               Assigned {formatDateTime(img.assigned_at)}
                             </div>
                           )}
+                          {img.submitted_at && ["submitted", "approved", "rejected"].includes(img.review_status) && (
+                            <div className="text-[10px] truncate text-muted-foreground" title={formatDateTime(img.submitted_at)} data-testid={`submitted-at-${img.id}`}>
+                              Submitted {formatDateTime(img.submitted_at)}
+                            </div>
+                          )}
+                          {img.reviewed_at && ["approved", "rejected"].includes(img.review_status) && (
+                            <div className={`text-[10px] truncate ${img.review_status === "approved" ? "text-[#22C55E]" : "text-destructive"}`} title={formatDateTime(img.reviewed_at)} data-testid={`reviewed-at-${img.id}`}>
+                              {img.review_status === "approved" ? "Approved" : "Rejected"} {formatDateTime(img.reviewed_at)}
+                            </div>
+                          )}
                           <div className="text-[10px] text-primary mt-1">
                             {img.is_null ? <span className="text-[#EAB308]" data-testid={`null-badge-${img.id}`}>NULL · no objects</span>
                               : <>{img.annotation_count || 0} annotation{(img.annotation_count || 0) !== 1 ? "s" : ""}</>}
