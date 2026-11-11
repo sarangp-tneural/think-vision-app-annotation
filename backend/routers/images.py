@@ -17,10 +17,6 @@ class BulkReviewIn(BaseModel):
     decision: str = "approve"
 
 
-class BulkNullIn(BaseModel):
-    image_ids: list[str]
-
-
 class BulkDeleteIn(BaseModel):
     image_ids: list[str]
     include_approved: bool = False  # approved images are only deleted when this is set
@@ -358,37 +354,6 @@ def register(s):
             await s._maybe_send_retrain_nudge(project, me)
         return {"approved": approved, "skipped_not_submitted": not_submitted + (len(ids) - len(docs)),
                 "skipped_other_reviewer": other_reviewer, "skipped_own": own}
-
-    @router.post("/projects/{pid}/images/bulk-null")
-    async def bulk_null_images(pid: str, payload: BulkNullIn, current=Depends(get_current_user)):
-        """Mark images that have nothing to annotate as null and submit them for review. Images with boxes
-        and images the caller may not edit right now are skipped, each with its own count."""
-        await s._verify_project(pid, current["id"])
-        ids = list(dict.fromkeys(payload.image_ids))
-        docs = await db.images.find({"id": {"$in": ids}, "project_id": pid}, {"_id": 0}).to_list(None)
-        ok_ids, has_boxes, locked = [], 0, 0
-        for d in docs:
-            if d.get("annotations"):
-                has_boxes += 1
-                continue
-            try:
-                await s._image_edit_check(d, current["id"])
-            except HTTPException:
-                locked += 1
-                continue
-            ok_ids.append(d["id"])
-        done = 0
-        now = datetime.now(timezone.utc).isoformat()
-        for d in [x for x in docs if x["id"] in set(ok_ids)]:
-            changes = {"annotations": [], "annotated": True, "is_null": True, "annotated_by": current["id"], "annotated_at": now,
-                       **_submit_fields()}
-            if not d.get("assigned_to"):
-                changes["assigned_to"] = current["id"]
-            res = await db.images.update_one({"id": d["id"], "review_status": {"$nin": ["submitted", "approved"]}}, {"$set": changes})
-            done += res.modified_count
-        if done:
-            await s._log_activity(pid, current["id"], "bulk_marked_null", {"count": done})
-        return {"marked": done, "skipped_has_annotations": has_boxes, "skipped_locked": locked + (len(ids) - len(docs))}
 
     @router.post("/images/{img_id}/withdraw")
     async def withdraw_image(img_id: str, current=Depends(get_current_user)):

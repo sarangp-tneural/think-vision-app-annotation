@@ -68,8 +68,6 @@ export default function ProjectDetail() {
   const [exportProgress, setExportProgress] = useState("");
   const [approveInfo, setApproveInfo] = useState(null); // { submitted, total } while the bulk-approve confirm is open
   const [approving, setApproving] = useState(false);
-  const [nullOpen, setNullOpen] = useState(false);
-  const [markingNull, setMarkingNull] = useState(false);
   const [bulkUser, setBulkUser] = useState("");
   const [bulkMode, setBulkMode] = useState("single"); // "single" | "split"
   const [bulkFor, setBulkFor] = useState("annotate"); // "annotate" | "review"
@@ -511,25 +509,6 @@ export default function ProjectDetail() {
       toast.error(e.response?.data?.detail || "Bulk approve failed");
     } finally {
       setApproving(false);
-    }
-  };
-
-  const confirmBulkNull = async () => {
-    setMarkingNull(true);
-    try {
-      const { data } = await api.post(`/projects/${pid}/images/bulk-null`, { image_ids: [...selectedIds] });
-      const skipped = [
-        data.skipped_has_annotations && `${data.skipped_has_annotations} have annotations`,
-        data.skipped_locked && `${data.skipped_locked} locked or not yours`,
-      ].filter(Boolean);
-      toast.success(`${data.marked} marked as null${skipped.length ? ` (${skipped.join(", ")} skipped)` : ""}`);
-      setNullOpen(false);
-      setSelectedIds(new Set());
-      load();
-    } catch (e) {
-      toast.error(e.response?.data?.detail || "Mark as null failed");
-    } finally {
-      setMarkingNull(false);
     }
   };
 
@@ -1146,32 +1125,6 @@ export default function ProjectDetail() {
                       <AlertDialogCancel disabled={approving} className="rounded-sm">Cancel</AlertDialogCancel>
                       <Button onClick={confirmBulkApprove} disabled={approving} className="rounded-sm bg-[#22C55E] text-black hover:bg-[#22C55E]/90" data-testid="bulk-approve-confirm">
                         {approving ? "Approving..." : "Approve"}
-                      </Button>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-                {myRole !== "reviewer" && selectedIds.size > 0 && (
-                  <Button
-                    variant="outline"
-                    onClick={() => setNullOpen(true)}
-                    className="rounded-sm border-[#EAB308] text-[#EAB308] bg-transparent hover:bg-[#EAB308]/10 text-xs uppercase tracking-[0.2em]"
-                    data-testid="bulk-null-btn"
-                  >
-                    Mark null ({selectedIds.size})
-                  </Button>
-                )}
-                <AlertDialog open={nullOpen} onOpenChange={(o) => { if (!o && !markingNull) setNullOpen(false); }}>
-                  <AlertDialogContent className="bg-[#121212] border-[#27272A] rounded-sm">
-                    <AlertDialogHeader>
-                      <AlertDialogTitle className="font-heading tracking-tight">Mark {selectedIds.size} image{selectedIds.size === 1 ? "" : "s"} as null?</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        Use this for images with nothing to annotate. They are submitted for review as empty images and, once approved, are exported and used for training as background images. Images that already have annotations are skipped.
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel disabled={markingNull} className="rounded-sm">Cancel</AlertDialogCancel>
-                      <Button onClick={confirmBulkNull} disabled={markingNull} className="rounded-sm bg-[#EAB308] text-black hover:bg-[#EAB308]/90" data-testid="bulk-null-confirm">
-                        {markingNull ? "Marking..." : "Mark as null"}
                       </Button>
                     </AlertDialogFooter>
                   </AlertDialogContent>

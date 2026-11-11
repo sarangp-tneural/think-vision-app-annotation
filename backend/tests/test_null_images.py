@@ -52,11 +52,7 @@ def test_null_flow(client, db):
     assert d["is_null"] is False and d["annotated"] is True
     client.put("/api/images/n2/annotations", json={"boxes": []}, headers=owner)
     assert db.images.find_one({"id": "n2"})["annotated"] is False
-    # bulk: n2 (empty, open) + n3 (open) marked; n4 has boxes -> skipped; n1 already submitted -> locked
-    db.images.update_one({"id": "n4"}, {"$set": {"annotations": [box], "annotated": True}})
-    r = client.post(f"/api/projects/{pid}/images/bulk-null", json={"image_ids": ["n1", "n2", "n3", "n4", "zz"]}, headers=owner)
-    assert r.json() == {"marked": 2, "skipped_has_annotations": 1, "skipped_locked": 2}
-    assert {d["id"] for d in db.images.find({"is_null": True, "review_status": "submitted"})} == {"n1", "n2", "n3"}
+    client.put("/api/images/n3/annotations", json={"boxes": [], "is_null": True, "submit": True}, headers=owner)
     # approve one null image: it counts for training and exports with an empty label file
     db.images.update_one({"id": "n1"}, {"$set": {"review_status": "approved"}})
     assert db.images.count_documents({"project_id": pid, "review_status": "approved", **__import__("server").HAS_LABELS}) == 1
