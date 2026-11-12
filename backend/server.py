@@ -1842,6 +1842,12 @@ def auto_scale_epochs(image_count: int, requested: Optional[int] = None) -> int:
     return 50
 
 
+SUPPORTED_ARCHS = [
+    "yolov8n", "yolov8s", "yolov8m", "yolov8l",
+    "yolo11n", "yolo11s", "yolo11m", "yolo11l",
+]
+
+
 def _train_yolo_sync(job_id: str, project_id: str, model_arch: str, epochs: int):
     """Blocking YOLOv8 training in a thread."""
     from pymongo import MongoClient
@@ -2266,7 +2272,7 @@ async def system_versions():
         versions["cuda_available"] = torch.cuda.is_available()
     except Exception:
         versions["torch"] = None
-    versions["supported_archs"] = ["yolov8n", "yolov8s", "yolov8m", "yolov8l"]
+    versions["supported_archs"] = SUPPORTED_ARCHS
     versions["brand"] = BRAND_NAME
     versions["allowed_email_domain"] = ALLOWED_EMAIL_DOMAIN or None
     return versions

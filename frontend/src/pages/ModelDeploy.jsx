@@ -330,6 +330,10 @@ export default function ModelDeploy() {
                       <SelectItem value="yolov8s">YOLOv8s · small</SelectItem>
                       <SelectItem value="yolov8m">YOLOv8m · medium</SelectItem>
                       <SelectItem value="yolov8l">YOLOv8l · large (accurate, slow)</SelectItem>
+                      <SelectItem value="yolo11n">YOLO11n · nano (fast, CPU)</SelectItem>
+                      <SelectItem value="yolo11s">YOLO11s · small</SelectItem>
+                      <SelectItem value="yolo11m">YOLO11m · medium</SelectItem>
+                      <SelectItem value="yolo11l">YOLO11l · large (accurate, slow)</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -571,6 +575,10 @@ export default function ModelDeploy() {
                   <SelectItem value="yolov8s">YOLOv8 small</SelectItem>
                   <SelectItem value="yolov8m">YOLOv8 medium</SelectItem>
                   <SelectItem value="yolov8l">YOLOv8 large</SelectItem>
+                  <SelectItem value="yolo11n">YOLO11 nano</SelectItem>
+                  <SelectItem value="yolo11s">YOLO11 small</SelectItem>
+                  <SelectItem value="yolo11m">YOLO11 medium</SelectItem>
+                  <SelectItem value="yolo11l">YOLO11 large</SelectItem>
                   <SelectItem value="rt-detr">RT-DETR</SelectItem>
                 </SelectContent>
               </Select>

@@ -155,7 +155,10 @@ class TrainRemoteRequest(SSHCredentials):
     remote_workdir: str
     env_mode: Literal["system", "existing", "create"] = "system"
     venv_path: Optional[str] = None
-    model_arch: Literal["yolov8n", "yolov8s", "yolov8m", "yolov8l"] = "yolov8n"
+    model_arch: Literal[
+        "yolov8n", "yolov8s", "yolov8m", "yolov8l",
+        "yolo11n", "yolo11s", "yolo11m", "yolo11l",
+    ] = "yolov8n"
     epochs: int = 0  # 0 = auto, same as local training
 
     @model_validator(mode="after")

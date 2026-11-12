@@ -29,6 +29,8 @@ def register(s):
         current=Depends(get_current_user),
     ):
         await s._require_not_reviewer(pid, current["id"])
+        if model_arch not in s.SUPPORTED_ARCHS:
+            raise HTTPException(status_code=400, detail=f"model_arch must be one of {', '.join(s.SUPPORTED_ARCHS)}")
         if epochs < 0 or epochs > 200:
             raise HTTPException(status_code=400, detail="epochs must be between 0 (auto) and 200")
         approved = await db.images.count_documents({"project_id": pid, "review_status": "approved", **s.HAS_LABELS})
