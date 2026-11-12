@@ -14,7 +14,7 @@ import mimetypes
 import shutil
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import List, Optional, Any
+from typing import Dict, List, Optional, Any
 
 import requests
 import jwt as pyjwt
@@ -288,6 +288,7 @@ class ProjectOut(BaseModel):
     task_type: str
     classes: List[str] = []
     classes_locked: bool = False
+    class_colors: Dict[str, str] = {}
     image_count: int = 0
     annotated_count: int = 0
     created_at: str
@@ -535,6 +536,7 @@ async def _project_out(pid: str):
         "task_type": p.get("task_type", "object_detection"),
         "classes": p.get("classes", []),
         "classes_locked": bool(p.get("classes_locked", False)),
+        "class_colors": p.get("class_colors") or {},
         "class_origin": p.get("class_origin"),
         "class_name_drift": bool(p.get("class_name_drift", False)),
         "image_count": image_count,

@@ -1,4 +1,5 @@
 """Projects endpoints: create, list, get, delete, classes (add/bulk/delete), settings."""
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -73,6 +74,7 @@ def register(s):
                 "task_type": p.get("task_type", "object_detection"),
                 "classes": p.get("classes", []),
                 "classes_locked": bool(p.get("classes_locked", False)),
+                "class_colors": p.get("class_colors") or {},
                 "image_count": image_count, "annotated_count": annotated_count,
                 "team_id": tid, "team_name": team_name_map.get(tid, ""),
                 "my_role": role_by_team.get(tid) if tid else "owner",
@@ -141,7 +143,7 @@ def register(s):
         # different labels run concurrently (e.g. clicking through multiple
         # class chips quickly). A read-then-$set-the-whole-list here would
         # let a slower concurrent request overwrite a faster one's removal.
-        await db.projects.update_one({"id": pid}, {"$pull": {"classes": label}})
+        await db.projects.update_one({"id": pid}, {"$pull": {"classes": label}, "$unset": {f"class_colors.{label}": ""}})
         p = await db.projects.find_one({"id": pid}, {"_id": 0, "classes": 1})
         return {"classes": p.get("classes", [])}
 
@@ -161,6 +163,18 @@ def register(s):
             await s._log_activity(pid, current["id"], "classes_locked", {"source": source})
         fresh = await db.projects.find_one({"id": pid}, {"_id": 0, "classes": 1, "classes_locked": 1})
         return {"classes": fresh.get("classes", []), "classes_locked": bool(fresh.get("classes_locked"))}
+
+    @router.patch("/projects/{pid}/classes/{label}/color")
+    async def set_class_color(pid: str, label: str, payload: dict, current=Depends(get_current_user)):
+        p = await s._project_access_check(pid, current["id"], roles=["owner", "admin"])
+        color = str(payload.get("color") or "").strip()
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            raise HTTPException(status_code=400, detail="Color must be a #RRGGBB hex value")
+        if label not in p.get("classes", []):
+            raise HTTPException(status_code=404, detail="Class not found")
+        await db.projects.update_one({"id": pid}, {"$set": {f"class_colors.{label}": color.upper()}})
+        fresh = await db.projects.find_one({"id": pid}, {"_id": 0, "class_colors": 1})
+        return {"class_colors": fresh.get("class_colors") or {}}
 
     @router.patch("/projects/{pid}/classes/{label}")
     async def rename_class(pid: str, label: str, payload: dict, current=Depends(get_current_user)):
@@ -188,6 +202,12 @@ def register(s):
             res = await db.projects.update_one({"id": pid, "classes": classes}, {"$set": {"classes": renamed}})
         if res.matched_count == 0:
             raise HTTPException(status_code=409, detail="Classes changed while renaming, try again")
+        colors = p.get("class_colors") or {}
+        if label in colors:
+            upd = {"$unset": {f"class_colors.{label}": ""}}
+            if not merged:
+                upd["$set"] = {f"class_colors.{new}": colors[label]}
+            await db.projects.update_one({"id": pid}, upd)
         images = await db.images.update_many(
             {"project_id": pid, "annotations.label": label},
             {"$set": {"annotations.$[a].label": new}},

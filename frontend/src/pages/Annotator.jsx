@@ -16,13 +16,19 @@ import {
   Save, Sparkles, Trash2, ArrowLeft, ArrowRight, Undo2, Copy,
   Square, Hexagon, Slash, Dot, Circle as CircleIcon, Keyboard,
   ZoomIn, ZoomOut, Maximize2, Crosshair, Send, CheckCircle2, XCircle, UserPlus,
-  MessageSquare, Reply, Check, Pencil, RotateCw, ChevronDown, MousePointer2,
+  MessageSquare, Reply, Check, Pencil, Palette, RotateCw, ChevronDown, MousePointer2,
 } from "lucide-react";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
 
-const COLORS = ["#06B6D4", "#D946EF", "#EAB308", "#22C55E", "#EF4444", "#F97316", "#3B82F6"];
+const COLORS = [
+  "#06B6D4", "#D946EF", "#EAB308", "#22C55E", "#EF4444", "#F97316", "#3B82F6",
+  "#8B5CF6", "#EC4899", "#14B8A6", "#84CC16", "#F43F5E", "#0EA5E9", "#A855F7",
+  "#10B981", "#FB923C", "#FACC15", "#6366F1", "#F472B6", "#2DD4BF", "#A3E635",
+  "#FB7185", "#38BDF8", "#C084FC", "#FFFFFF", "#9CA3AF", "#B45309", "#7C2D12",
+];
 
 const TOOLS = [
   { id: "select", label: "Select", icon: MousePointer2, key: "V" },
@@ -147,6 +153,8 @@ export default function Annotator() {
 
   const labelColor = (label) => {
     if (!project) return COLORS[0];
+    const custom = project.class_colors?.[label];
+    if (custom) return custom;
     const idx = project.classes.indexOf(label);
     return COLORS[(idx >= 0 ? idx : 0) % COLORS.length];
   };
@@ -774,10 +782,22 @@ export default function Annotator() {
     setRenamingClass(null);
     const res = await renameClass(pid, from, value, project.classes);
     if (!res) return;
-    setProject((p) => (p ? { ...p, classes: res.classes } : p));
+    setProject((p) => {
+      if (!p) return p;
+      const cc = { ...(p.class_colors || {}) };
+      if (cc[from] && res.to !== from) { if (!res.merged) cc[res.to] = cc[from]; delete cc[from]; }
+      return { ...p, classes: res.classes, class_colors: cc };
+    });
     // The server already relabeled the saved boxes; mirror it on the open canvas without marking it dirty.
     setBoxes((bs) => bs.map((b) => (b.label === from ? { ...b, label: res.to } : b)));
     setActiveLabel((cur) => (cur === from ? res.to : cur));
+  };
+
+  const setClassColor = async (label, color) => {
+    setProject((p) => (p ? { ...p, class_colors: { ...(p.class_colors || {}), [label]: color } } : p));
+    try {
+      await api.patch(`/projects/${pid}/classes/${encodeURIComponent(label)}/color`, { color });
+    } catch { toast.error("Failed to save color"); loadProject(); }
   };
 
   const addClass = async () => {
@@ -976,6 +996,43 @@ export default function Annotator() {
                     <span className="w-3 h-3 flex-shrink-0" style={{ background: labelColor(c) }} />
                     <span className="text-xs truncate">{c}</span>
                   </button>
+                  {canManageRole && (
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <button
+                          className="px-2 border border-[#27272A] hover:bg-[#1C1C1C] flex items-center"
+                          title="Change class color"
+                          aria-label={`Change color of class ${c}`}
+                          data-testid={CLASSES.color(c)}
+                        >
+                          <Palette className="w-3 h-3 text-muted-foreground" />
+                        </button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-52 p-3 rounded-sm bg-[#111] border-[#27272A]" align="start">
+                        <div className="grid grid-cols-7 gap-1.5">
+                          {COLORS.map((col) => (
+                            <button
+                              key={col}
+                              onClick={() => setClassColor(c, col)}
+                              className={`w-5 h-5 border ${labelColor(c).toLowerCase() === col.toLowerCase() ? "border-white" : "border-[#27272A]"}`}
+                              style={{ background: col }}
+                              aria-label={col}
+                            />
+                          ))}
+                        </div>
+                        <label className="mt-3 flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+                          Custom
+                          <input
+                            type="color"
+                            value={labelColor(c).toLowerCase()}
+                            onChange={(e) => setClassColor(c, e.target.value.toUpperCase())}
+                            className="h-6 w-10 bg-transparent border border-[#27272A] cursor-pointer"
+                            data-testid={CLASSES.colorInput}
+                          />
+                        </label>
+                      </PopoverContent>
+                    </Popover>
+                  )}
                   {canManageRole && (
                     <button
                       onClick={() => setRenamingClass({ from: c, value: c })}
